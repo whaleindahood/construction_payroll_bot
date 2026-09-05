@@ -13,9 +13,9 @@ from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot import keyboards as kb
-from app.bot.handlers import Services, answer_long, parse_date
+from app.bot.common import Services, answer_long, parse_date
 from app.reports import table_csv, table_xlsx
-from app.services import DomainError, clean_text, money
+from app.services import DomainError, as_money, clean_text, money
 from app.teams import TeamService
 
 
@@ -38,6 +38,7 @@ class ShiftForm(StatesGroup):
     custom_date = State()
     people = State()
     confirm = State()
+    void = State()
 
 
 class EditForm(StatesGroup):
@@ -63,6 +64,11 @@ class ObjectPaymentForm(StatesGroup):
     void = State()
 
 
+class UnratedForm(StatesGroup):
+    amount = State()
+    confirm = State()
+
+
 def buttons(*items):
     builder = InlineKeyboardBuilder()
     for label, callback in items:
@@ -75,7 +81,7 @@ def optional(value, field, limit):
     return clean_text(None if value == "-" else value, field, limit)
 
 
-def build_router(services: Services, *, timezone_name: str, default_currency: str) -> Router:
+def build_router(services: Services, *, timezone_name: str) -> Router:
     router = Router(name="object_workflow")
     router.message.filter(MagicData(F.is_owner))
     router.callback_query.filter(MagicData(F.is_owner))
@@ -85,17 +91,14 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         return datetime.now(ZoneInfo(timezone_name)).date()
 
     async def objects(message, *, deleted=False):
-        rows = [
-            obj
-            for obj in services.objects.list(active_only=False)
-            if (obj.status == "archived") == deleted
-        ]
+        all_rows = services.objects.list(active_only=False)
+        rows = [obj for obj in all_rows if (obj.status == "archived") == deleted]
         actions = [(obj.name, f"obj:{obj.id}") for obj in rows]
         if deleted:
             actions.append(("← Объекты", "objects"))
         else:
             actions.append(("➕ Новый объект", "obj:create"))
-            if any(obj.status == "archived" for obj in services.objects.list(active_only=False)):
+            if any(obj.status == "archived" for obj in all_rows):
                 actions.append(("Удалённые объекты", "objects:deleted"))
         await message.answer(
             "Удаленные объекты (можно восстановить):"
@@ -105,17 +108,14 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         )
 
     async def employees(message, *, deleted=False):
-        rows = [
-            emp
-            for emp in services.employees.list(active_only=False)
-            if (emp.status == "inactive") == deleted
-        ]
+        all_rows = services.employees.list(active_only=False)
+        rows = [emp for emp in all_rows if (emp.status == "inactive") == deleted]
         actions = [(emp.name, f"emp:{emp.id}") for emp in rows]
         if deleted:
             actions.append(("← Сотрудники", "employees"))
         else:
             actions.append(("➕ Новый сотрудник", "emp:create"))
-            if any(emp.status == "inactive" for emp in services.employees.list(active_only=False)):
+            if any(emp.status == "inactive" for emp in all_rows):
                 actions.append(("Удалённые сотрудники", "employees:deleted"))
         await message.answer(
             "Удаленные сотрудники (можно восстановить):" if deleted else "База сотрудников:",
@@ -351,14 +351,8 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await object_card(callback.message, object_id)
 
     @router.callback_query(F.data.regexp(r"^objsettings:[0-9a-f-]{36}$"))
-    @router.callback_query(F.data == "object:edit")
     async def edit_object(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        object_id = (
-            callback.data.split(":", 1)[1]
-            if callback.data.startswith("objsettings:")
-            else data.get("object_id", "")
-        )
+        object_id = callback.data.split(":", 1)[1]
         obj = services.objects.get(object_id)
         await state.clear()
         await state.update_data(object_id=obj.id)
@@ -368,12 +362,15 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             f"Настройки: {obj.name}\nНачало работ: {obj.start_date:%d.%m.%Y}\n"
             f"Описание: {obj.description or '—'}\nПримечание: {obj.comment or '—'}\n\nЧто изменить?",
             reply_markup=buttons(
-                ("Название", "objectfield:name"),
-                ("Адрес", "objectfield:address"),
-                ("Дата начала работ", "objectfield:start_date"),
-                ("Описание", "objectfield:description"),
-                ("Примечание", "objectfield:comment"),
-                ("Завершить / возобновить работы", "object:status"),
+                ("Название", f"objectfield:name:{obj.id}"),
+                ("Адрес", f"objectfield:address:{obj.id}"),
+                ("Дата начала работ", f"objectfield:start_date:{obj.id}"),
+                ("Описание", f"objectfield:description:{obj.id}"),
+                ("Примечание", f"objectfield:comment:{obj.id}"),
+                (
+                    "Завершить работы" if obj.status == "active" else "Возобновить работы",
+                    f"objectstatus:{obj.id}:{'completed' if obj.status == 'active' else 'active'}",
+                ),
                 ("Восстановить объект", f"restore:obj:{obj.id}")
                 if obj.status == "archived"
                 else ("Удалить объект", f"delete:obj:{obj.id}"),
@@ -381,17 +378,20 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             ),
         )
 
-    @router.callback_query(F.data.startswith("objectfield:"))
+    @router.callback_query(
+        F.data.regexp(r"^objectfield:(name|address|start_date|description|comment):[0-9a-f-]{36}$")
+    )
     async def object_edit_field(callback: CallbackQuery, state: FSMContext):
-        if not (await state.get_data()).get("object_id"):
-            raise DomainError("Сначала откройте объект.")
-        await state.update_data(edit_field=callback.data.split(":")[1])
+        _, field, object_id = callback.data.split(":")
+        obj = services.objects.get(object_id)
+        await state.clear()
+        await state.update_data(object_id=obj.id, edit_field=field)
         await state.set_state(EditForm.object)
         await callback.answer()
         await callback.message.answer(
-            "Введите дату ДД.ММ.ГГГГ:"
-            if callback.data.endswith(":start_date")
-            else "Введите новое значение. «-» очищает необязательное поле:"
+            f"{obj.name}\nВведите дату ДД.ММ.ГГГГ:"
+            if callback.data.split(":")[1] == "start_date"
+            else f"{obj.name}\nВведите новое значение. «-» очищает необязательное поле:"
         )
 
     @router.message(EditForm.object)
@@ -414,13 +414,13 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         services.objects.update(obj.id, **values, actor=message.from_user.id)
         await back(message, state)
 
-    @router.callback_query(F.data == "object:status")
+    @router.callback_query(F.data.regexp(r"^objectstatus:[0-9a-f-]{36}:(active|completed)$"))
     async def object_status(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        obj = services.objects.get(data.get("object_id", ""))
-        services.objects.set_status(
-            obj.id, "completed" if obj.status == "active" else "active", actor=callback.from_user.id
-        )
+        _, object_id, status = callback.data.split(":")
+        obj = services.objects.get(object_id)
+        await state.clear()
+        await state.update_data(object_id=obj.id)
+        services.objects.set_status(obj.id, status, actor=callback.from_user.id)
         await callback.answer("Статус изменен")
         await back(callback.message, state)
 
@@ -429,20 +429,25 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await state.clear()
         await employees(message)
 
-    @router.callback_query(F.data == "team:add")
-    @router.callback_query(F.data == "team:existing")
+    @router.callback_query(F.data.regexp(r"^teamadd:[0-9a-f-]{36}$"))
     async def existing_people(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        if not data.get("object_id"):
-            raise DomainError("Сначала откройте объект.")
+        object_id = callback.data.split(":", 1)[1]
+        obj = services.objects.get(object_id)
+        if obj.status != "active":
+            raise DomainError("Объект закрыт для новых сотрудников.")
+        if data.get("object_id") != object_id:
+            await state.clear()
+        token = uuid.uuid4().hex[:12]
+        await state.update_data(object_id=object_id, add_token=token)
         await callback.answer()
-        available = team.available(data["object_id"])
+        available = team.available(object_id)
         await callback.message.answer(
             "Добавить на объект. Выберите сотрудника из базы или создайте нового:"
             if available
             else "Нет сотрудников для добавления. Создайте нового:",
             reply_markup=buttons(
-                *[(employee.name, f"attach:{employee.id}") for employee in available],
+                *[(employee.name, f"attach:{employee.id}:{token}") for employee in available],
                 ("➕ Новый сотрудник", "emp:create"),
                 ("← Назад", "add:back"),
             ),
@@ -470,12 +475,13 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer()
         await person_preview(callback.message, state)
 
-    @router.callback_query(F.data.startswith("attach:"))
+    @router.callback_query(F.data.regexp(r"^attach:[0-9a-f-]{36}:[0-9a-f]{12}$"))
     async def attach_person(callback: CallbackQuery, state: FSMContext):
-        employee = services.employees.get(callback.data.split(":", 1)[1])
+        _, employee_id, token = callback.data.split(":")
         data = await state.get_data()
-        if not data.get("object_id"):
-            raise DomainError("Сначала откройте объект.")
+        if token != data.get("add_token"):
+            raise DomainError("Список устарел. Откройте сотрудников объекта заново.")
+        employee = services.employees.get(employee_id)
         await state.update_data(existing_employee_id=employee.id, person_name=employee.name)
         await callback.answer()
         await rate_prompt(callback.message, state)
@@ -529,10 +535,12 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
                 f"Объект: {services.objects.get(data['object_id']).name}",
                 f"Стоимость смены: {data.get('shift_rate') or 'не указана'}",
             ]
+        token = str(uuid.uuid4())
+        await state.update_data(person_token=token)
         await state.set_state(PersonForm.confirm)
         await message.answer(
             "\n".join(lines),
-            reply_markup=buttons(("✅ Сохранить", "person:save"), ("Отмена", "cancel")),
+            reply_markup=buttons(("✅ Сохранить", f"personsave:{token}"), ("Отмена", "cancel")),
         )
 
     @router.message(PersonForm.rate)
@@ -541,9 +549,11 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await state.update_data(shift_rate=str(money(value)) if value is not None else None)
         await person_preview(message, state)
 
-    @router.callback_query(PersonForm.confirm, F.data == "person:save")
+    @router.callback_query(PersonForm.confirm, F.data.startswith("personsave:"))
     async def person_save(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["person_token"]:
+            raise DomainError("Подтверждение устарело. Проверьте текущую карточку.")
         if data.get("existing_employee_id"):
             employee_id = data["existing_employee_id"]
             team.add(
@@ -611,26 +621,32 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.message.answer(
             "Что изменить?",
             reply_markup=buttons(
-                ("ФИО", "personfield:name"),
-                ("Телефон", "personfield:phone"),
-                ("Реквизиты", "personfield:payment_details"),
-                ("Telegram ID", "personfield:telegram_id"),
-                ("Дата начала работы", "personfield:start_date"),
-                ("Примечание", "personfield:comment"),
+                ("ФИО", f"personfield:name:{employee_id}"),
+                ("Телефон", f"personfield:phone:{employee_id}"),
+                ("Реквизиты", f"personfield:payment_details:{employee_id}"),
+                ("Telegram ID", f"personfield:telegram_id:{employee_id}"),
+                ("Дата начала работы", f"personfield:start_date:{employee_id}"),
+                ("Примечание", f"personfield:comment:{employee_id}"),
                 ("Удалить сотрудника из базы", f"delete:emp:{employee_id}"),
                 ("← Назад", f"emp:{employee_id}"),
             ),
         )
 
-    @router.callback_query(F.data.startswith("personfield:"))
+    @router.callback_query(
+        F.data.regexp(
+            r"^personfield:(name|phone|payment_details|telegram_id|start_date|comment):[0-9a-f-]{36}$"
+        )
+    )
     async def edit_person_field(callback: CallbackQuery, state: FSMContext):
-        await state.update_data(edit_field=callback.data.split(":")[1])
+        _, field, employee_id = callback.data.split(":")
+        employee = services.employees.get(employee_id)
+        await state.set_data({"edit_employee_id": employee_id, "edit_field": field})
         await state.set_state(EditForm.person)
         await callback.answer()
         await callback.message.answer(
-            "Введите дату ДД.ММ.ГГГГ:"
-            if callback.data.endswith(":start_date")
-            else "Введите новое значение. «-» очищает поле:"
+            f"{employee.name}\nВведите дату ДД.ММ.ГГГГ:"
+            if callback.data.split(":")[1] == "start_date"
+            else f"{employee.name}\nВведите новое значение. «-» очищает поле:"
         )
 
     @router.message(EditForm.person)
@@ -668,15 +684,9 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await state.set_state(None)
         await employee_card(message, employee.id)
 
-    @router.callback_query(F.data == "team:list")
     @router.callback_query(F.data.regexp(r"^team(open|former):[0-9a-f-]{36}$"))
     async def roster(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        object_id = (
-            data.get("object_id", "")
-            if callback.data == "team:list"
-            else callback.data.split(":", 1)[1]
-        )
+        object_id = callback.data.split(":", 1)[1]
         await callback.answer()
         await show_roster(
             callback.message, state, object_id, former=callback.data.startswith("teamformer:")
@@ -696,7 +706,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             (f"{emp.name} · {count} смен", f"member:{member.id}") for member, emp, count in rows
         ]
         if not former and obj.status == "active":
-            actions.append(("➕ Добавить сотрудника", "team:add"))
+            actions.append(("➕ Добавить сотрудника", f"teamadd:{obj.id}"))
         if former:
             actions.append(("← Сотрудники объекта", f"teamopen:{obj.id}"))
         elif len(rows) != len(all_rows):
@@ -733,7 +743,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await message.answer(
             f"{employee.name}\nОбъект: {obj.name}\n"
             + ("Убран из состава\n" if not member.active else "")
-            + f"Смен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}\n\n"
+            + f"Всего отработано смен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}\n\n"
             f"За всё время на этом объекте:\n"
             f"Начислено{' по сменам со ставкой' if summary.unrated_shifts else ''}: {summary.earned} {summary.currency}\n"
             f"Выплачено: {summary.paid} {summary.currency}\n{balance}",
@@ -754,11 +764,11 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await state.update_data(object_id=obj.id, member_id=member.id)
         if callback.data.startswith("memberlog:"):
             text = f"История · {employee.name}\n{obj.name}"
-            actions = [("Смены", "member:history"), ("Выплаты", f"pays:{member.id}:0")]
+            actions = [("Смены", f"shifts:{member.id}:0"), ("Выплаты", f"pays:{member.id}:0")]
         else:
             text = f"{employee.name}\n{obj.name}\n\nРеквизиты:\n{employee.payment_details or 'не заполнены'}"
             actions = [
-                ("Ставка за смену", "member:rate"),
+                ("Ставка за смену", f"memberrate:{member.id}"),
                 ("Личные данные", f"emp:{employee.id}"),
                 (
                     "Убрать с объекта" if member.active else "Вернуть на объект",
@@ -767,9 +777,78 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             ]
             if employee.telegram_id is None and employee.status == "active":
                 actions.insert(2, ("Пригласить заполнить данные", f"empinvite:{employee.id}"))
+            if team.unrated(member.id):
+                actions.insert(1, ("Смены без ставки", f"unrated:{member.id}"))
         actions.append(("← Назад", f"member:{member.id}"))
         await callback.answer()
         await callback.message.answer(text, reply_markup=buttons(*actions))
+
+    @router.callback_query(F.data.regexp(r"^unrated:[0-9a-f-]{36}$"))
+    async def unrated_list(callback: CallbackQuery, state: FSMContext):
+        member = team.get(callback.data.split(":", 1)[1])
+        rows = team.unrated(member.id)
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        await state.clear()
+        await state.update_data(member_id=member.id, object_id=obj.id)
+        await callback.answer()
+        await callback.message.answer(
+            f"{employee.name}\n{obj.name}\nСмены без ставки: выберите дату.\n"
+            + (
+                "Показаны первые 20. Вся история доступна в разделе «История»."
+                if rows
+                else "Все смены рассчитаны."
+            ),
+            reply_markup=buttons(
+                *[(f"{row.work_date:%d.%m.%Y}", f"price:{row.id}") for row in rows],
+                ("← Назад", f"member:{member.id}"),
+            ),
+        )
+
+    @router.callback_query(F.data.regexp(r"^price:[0-9a-f-]{36}$"))
+    async def price_start(callback: CallbackQuery, state: FSMContext):
+        row = services.attendance.get(callback.data.split(":", 1)[1])
+        if row.voided_at or row.rate_snapshot is not None or row.earned_amount is not None:
+            raise DomainError("Смена уже рассчитана или отменена.")
+        employee = services.employees.get(row.employee_id)
+        obj = services.objects.get(row.object_id)
+        await state.clear()
+        await state.update_data(attendance_id=row.id, object_id=obj.id)
+        await state.set_state(UnratedForm.amount)
+        await callback.answer()
+        await callback.message.answer(
+            f"{employee.name}\n{obj.name} · {row.work_date:%d.%m.%Y}\nВведите ставку за полную смену в {row.currency}:"
+        )
+
+    @router.message(UnratedForm.amount)
+    async def price_preview(message: Message, state: FSMContext):
+        rate = money(message.text)
+        row = services.attendance.get((await state.get_data())["attendance_id"])
+        employee = services.employees.get(row.employee_id)
+        obj = services.objects.get(row.object_id)
+        token = str(uuid.uuid4())
+        await state.update_data(rate=str(rate), token=token)
+        await state.set_state(UnratedForm.confirm)
+        await message.answer(
+            f"Рассчитать смену?\n{employee.name}\n{obj.name} · {row.work_date:%d.%m.%Y}\n"
+            f"Ставка: {rate} {row.currency}\nНачисление: {as_money(row.coefficient * rate)} {row.currency}",
+            reply_markup=buttons(("Подтвердить", f"priceok:{token}"), ("Отмена", "cancel")),
+        )
+
+    @router.callback_query(UnratedForm.confirm, F.data.startswith("priceok:"))
+    async def price_save(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["token"]:
+            raise DomainError("Подтверждение устарело. Выберите смену заново.")
+        services.attendance.price_unrated(
+            data["attendance_id"], data["rate"], actor=callback.from_user.id
+        )
+        row = services.attendance.get(data["attendance_id"])
+        member = next(
+            member for member, emp, _ in team.roster(row.object_id) if emp.id == row.employee_id
+        )
+        await callback.answer("Начисление сохранено")
+        await show_member(callback.message, state, member.id)
 
     @router.callback_query(F.data.regexp(r"^membership:[01]:[0-9a-f-]{36}$"))
     async def membership_preview(callback: CallbackQuery, state: FSMContext):
@@ -974,14 +1053,18 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer("Запись выплаты отменена")
         await show_member(callback.message, state, data["member_id"])
 
-    @router.callback_query(F.data == "member:rate")
+    @router.callback_query(F.data.regexp(r"^memberrate:[0-9a-f-]{36}$"))
     async def member_rate(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        team.get(data.get("member_id", ""))
+        member = team.get(callback.data.split(":", 1)[1])
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        await state.clear()
+        await state.update_data(member_id=member.id, object_id=member.object_id)
         await state.set_state(EditForm.rate)
         await callback.answer()
         await callback.message.answer(
-            "Новая стоимость смены на этом объекте, в рублях, или «-». Она будет применяться при записи новых смен; сохраненные смены не пересчитываются."
+            f"{employee.name}\n{obj.name}\nНовая ставка в {employee.currency} или «-». "
+            "Она будет применяться при записи новых смен; сохраненные смены не пересчитываются."
         )
 
     @router.message(EditForm.rate)
@@ -1002,8 +1085,10 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer()
         await shift_picker(callback.message, state)
 
-    @router.callback_query(ShiftForm.people, F.data == "shift:date")
+    @router.callback_query(ShiftForm.people, F.data.startswith("shift:date:"))
     async def change_shift_date(callback: CallbackQuery, state: FSMContext):
+        if callback.data.rsplit(":", 1)[1] != (await state.get_data()).get("picker_token"):
+            raise DomainError("Список смен устарел. Откройте объект заново.")
         await state.set_state(ShiftForm.date)
         await callback.answer()
         await callback.message.answer(
@@ -1023,20 +1108,21 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             if emp.status == "active" and emp.start_date <= work_date
         ]
         selected = set(data.get("employee_ids", [])) & {emp.id for _, emp, _ in rows} - recorded
-        await state.update_data(employee_ids=sorted(selected))
+        token = uuid.uuid4().hex[:12]
+        await state.update_data(employee_ids=sorted(selected), picker_token=token)
         actions = []
         for _, employee, _ in rows:
             mark = "✅" if employee.id in recorded else "☑" if employee.id in selected else "☐"
             actions.append(
                 (
                     f"{mark} {employee.name}",
-                    "shifted" if employee.id in recorded else f"toggle:{employee.id}",
+                    "shifted" if employee.id in recorded else f"toggle:{employee.id}:{token}",
                 )
             )
         actions += [
-            ("✅ Сохранить выбранных", "shift:preview"),
-            ("Изменить дату", "shift:date"),
-            ("➕ Добавить сотрудника", "team:add"),
+            ("✅ Сохранить выбранных", f"shift:preview:{token}"),
+            ("Изменить дату", f"shift:date:{token}"),
+            ("➕ Добавить сотрудника", f"teamadd:{obj.id}"),
             ("← Объект", "cancel"),
         ]
         await state.set_state(ShiftForm.people)
@@ -1064,10 +1150,12 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await state.update_data(work_date=parse_date(message.text).isoformat(), employee_ids=[])
         await shift_picker(message, state)
 
-    @router.callback_query(ShiftForm.people, F.data.startswith("toggle:"))
+    @router.callback_query(ShiftForm.people, F.data.regexp(r"^toggle:[0-9a-f-]{36}:[0-9a-f]{12}$"))
     async def toggle(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        employee_id = callback.data.split(":", 1)[1]
+        _, employee_id, token = callback.data.split(":")
+        if token != data.get("picker_token"):
+            raise DomainError("Список смен устарел. Откройте объект заново.")
         allowed = {emp.id for _, emp, _ in team.roster(data["object_id"], active_only=True)}
         if employee_id not in allowed:
             raise DomainError("Сотрудник не входит в состав объекта.")
@@ -1102,9 +1190,11 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             show_alert=True,
         )
 
-    @router.callback_query(ShiftForm.people, F.data == "shift:preview")
+    @router.callback_query(ShiftForm.people, F.data.startswith("shift:preview:"))
     async def shift_preview(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
+        if callback.data.rsplit(":", 1)[1] != data.get("picker_token"):
+            raise DomainError("Список смен устарел. Откройте объект заново.")
         selected = data.get("employee_ids", [])
         rows = services.attendance.preview(
             employee_ids=selected,
@@ -1113,7 +1203,8 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             coefficient="1",
             require_assignment=True,
         )
-        await state.update_data(operation_key=f"shift:{uuid.uuid4()}")
+        operation_key = f"shift:{uuid.uuid4()}"
+        await state.update_data(operation_key=operation_key)
         await state.set_state(ShiftForm.confirm)
         await callback.answer()
         await answer_long(
@@ -1121,20 +1212,24 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             f"Записать смены за {date.fromisoformat(data['work_date']):%d.%m.%Y}?\n"
             + "\n".join(f"{row.employee_name} — +1 смена" for row in rows),
             reply_markup=buttons(
-                ("✅ Подтвердить", "shift:save"),
-                ("Изменить выбор", "shift:change"),
+                ("✅ Подтвердить", f"shiftsave:{operation_key}"),
+                ("Изменить выбор", f"shiftchange:{operation_key}"),
                 ("Отмена", "cancel"),
             ),
         )
 
-    @router.callback_query(ShiftForm.confirm, F.data == "shift:change")
+    @router.callback_query(ShiftForm.confirm, F.data.startswith("shiftchange:"))
     async def shift_change(callback: CallbackQuery, state: FSMContext):
+        if callback.data.split(":", 1)[1] != (await state.get_data())["operation_key"]:
+            raise DomainError("Эта кнопка устарела. Откройте объект заново.")
         await callback.answer()
         await shift_picker(callback.message, state)
 
-    @router.callback_query(ShiftForm.confirm, F.data == "shift:save")
+    @router.callback_query(ShiftForm.confirm, F.data.startswith("shiftsave:"))
     async def shift_save(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["operation_key"]:
+            raise DomainError("Подтверждение устарело. Проверьте текущие смены.")
         if date.fromisoformat(data["work_date"]) > today():
             raise DomainError("Нельзя отметить будущую смену.")
         rows = services.attendance.create_bulk(
@@ -1149,11 +1244,13 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer(f"Смен записано: {len(rows)}")
         await back(callback.message, state)
 
-    @router.callback_query(F.data == "member:history")
+    @router.callback_query(F.data.regexp(r"^shifts:[0-9a-f-]{36}:[0-9]{1,8}$"))
     async def member_history(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        member = team.get(data.get("member_id", ""))
-        page = int(data.get("history_offset", 0))
+        _, member_id, offset = callback.data.split(":")
+        member = team.get(member_id)
+        page = int(offset)
+        await state.clear()
+        await state.update_data(member_id=member.id, object_id=member.object_id)
         rows = team.history(member.object_id, member.employee_id, offset=page)
         await callback.answer()
         await callback.message.answer(
@@ -1162,34 +1259,32 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             else "Записей больше нет.",
             reply_markup=buttons(
                 *[(f"{row.work_date:%d.%m.%Y}", f"undo:{row.id}") for row in rows],
-                ("Следующие 20", "history:next"),
+                ("Следующие 20", f"shifts:{member.id}:{page + 20}"),
                 ("← История", f"memberlog:{member.id}"),
             ),
         )
 
-    @router.callback_query(F.data == "history:next")
-    async def history_next(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        await state.update_data(history_offset=int(data.get("history_offset", 0)) + 20)
-        await member_history(callback, state)
-
     @router.callback_query(F.data.regexp(r"^undo:[0-9a-f-]{36}$"))
     async def undo_preview(callback: CallbackQuery, state: FSMContext):
         row = services.attendance.get(callback.data.split(":", 1)[1])
-        await state.update_data(undo_id=row.id)
+        await state.clear()
+        await state.update_data(undo_id=row.id, object_id=row.object_id)
+        await state.set_state(ShiftForm.void)
         employee = services.employees.get(row.employee_id)
         obj = services.objects.get(row.object_id)
         await callback.answer()
         await callback.message.answer(
             f"Отменить смену {employee.name} на объекте «{obj.name}» за {row.work_date:%d.%m.%Y}?",
-            reply_markup=buttons(("Подтвердить отмену смены", "undo:confirm"), ("Назад", "cancel")),
+            reply_markup=buttons(
+                ("Подтвердить отмену смены", f"undook:{row.id}"), ("Назад", "cancel")
+            ),
         )
 
-    @router.callback_query(F.data == "undo:confirm")
+    @router.callback_query(ShiftForm.void, F.data.startswith("undook:"))
     async def undo_confirm(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        if not data.get("undo_id"):
-            raise DomainError("Сначала выберите смену в истории.")
+        if callback.data.split(":", 1)[1] != data.get("undo_id"):
+            raise DomainError("Подтверждение устарело. Выберите смену заново.")
         services.attendance.void(
             data["undo_id"], actor=callback.from_user.id, reason="Исправление отметки владельцем"
         )
@@ -1197,30 +1292,23 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await back(callback.message, state)
 
     @router.callback_query(F.data.regexp(r"^reportobj:[0-9a-f-]{36}$"))
-    @router.callback_query(F.data == "team:export")
     async def export_menu(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        obj = services.objects.get(
-            callback.data.split(":", 1)[1]
-            if callback.data.startswith("reportobj:")
-            else data.get("object_id", "")
-        )
+        obj = services.objects.get(callback.data.split(":", 1)[1])
         await state.clear()
         await state.update_data(object_id=obj.id)
         await callback.answer()
         await callback.message.answer(
             f"Отчёт · {obj.name}\nСмены, начисления, выплаты и остатки за всё время.",
             reply_markup=buttons(
-                ("Скачать Excel", "teamxlsx"),
-                ("Скачать CSV", "teamcsv"),
+                ("Скачать Excel", f"teamxlsx:{obj.id}"),
+                ("Скачать CSV", f"teamcsv:{obj.id}"),
                 ("← Объект", f"obj:{obj.id}"),
             ),
         )
 
-    @router.callback_query(F.data.in_({"teamcsv", "teamxlsx"}))
-    async def export(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        obj = services.objects.get(data.get("object_id", ""))
+    @router.callback_query(F.data.regexp(r"^team(csv|xlsx):[0-9a-f-]{36}$"))
+    async def export(callback: CallbackQuery):
+        obj = services.objects.get(callback.data.split(":", 1)[1])
         rows = []
         for member, emp, count in team.roster(obj.id):
             summary = services.payroll.summary(emp.id, object_id=obj.id)
@@ -1246,7 +1334,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             "Остаток (минус — аванс)",
             "Смен без ставки",
         ]
-        kind = "csv" if callback.data == "teamcsv" else "xlsx"
+        kind = "csv" if callback.data.startswith("teamcsv:") else "xlsx"
         payload = table_csv(headers, rows) if kind == "csv" else table_xlsx(obj.name, headers, rows)
         await callback.answer()
         await callback.message.answer_document(
@@ -1262,7 +1350,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     @router.message()
     async def fallback(message: Message):
         await message.answer(
-            "Откройте «🏗 Объекты» для работы со сменами или «👷 Сотрудники» для карточек.",
+            "Откройте «🏗 Объекты» для работы со сменами или «👷 База сотрудников» для карточек.",
             reply_markup=kb.MAIN,
         )
 

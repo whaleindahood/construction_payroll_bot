@@ -814,6 +814,36 @@ class AttendanceService:
                     return existing
             raise Conflict("Рабочий день уже сохранён.") from exc
 
+    def price_unrated(self, attendance_id: str, rate, *, actor: int):
+        value = money(rate)
+        with self.sessions() as session, session.begin():
+            row = session.get(Attendance, attendance_id)
+            if row is None:
+                raise NotFound("Смена не найдена.")
+            earned = as_money(row.coefficient * value)
+            changed = session.scalar(
+                update(Attendance)
+                .where(
+                    Attendance.id == attendance_id,
+                    Attendance.voided_at.is_(None),
+                    Attendance.rate_snapshot.is_(None),
+                    Attendance.earned_amount.is_(None),
+                )
+                .values(rate_snapshot=value, earned_amount=earned, modified_by=actor)
+                .returning(Attendance.id)
+            )
+            if changed is None:
+                raise Conflict("Смена уже рассчитана или отменена. Обновите историю.")
+            audit(
+                session,
+                actor,
+                "attendance_priced",
+                "attendance",
+                row.id,
+                before={"rate": None, "earned": None},
+                after={"rate": str(value), "earned": str(earned)},
+            )
+
     def void(self, attendance_id: str, *, actor: int, reason: str) -> None:
         reason = clean_text(reason, "Причина отмены", 1000, required=True)
         with self.sessions() as session, session.begin():
@@ -894,13 +924,6 @@ class PayrollService:
                 paid=as_money(paid),
                 unrated_shifts=unrated,
             )
-
-    def all_summaries(
-        self, *, date_from: date | None = None, date_to: date | None = None
-    ) -> list[PayrollSummary]:
-        with self.sessions() as session:
-            ids = list(session.scalars(select(Employee.id).order_by(Employee.name)))
-        return [self.summary(item, date_from=date_from, date_to=date_to) for item in ids]
 
 
 class PaymentService:
@@ -1033,61 +1056,6 @@ class PaymentService:
                     .limit(20)
                 )
             )
-
-
-class ReportService:
-    def __init__(self, sessions: sessionmaker[Session], payroll: PayrollService):
-        self.sessions = sessions
-        self.payroll = payroll
-
-    def employee_history(self, employee_id: str, date_from: date, date_to: date):
-        with self.sessions() as session:
-            attendance = list(
-                session.scalars(
-                    select(Attendance)
-                    .where(
-                        Attendance.employee_id == employee_id,
-                        Attendance.work_date.between(date_from, date_to),
-                        Attendance.voided_at.is_(None),
-                    )
-                    .order_by(Attendance.work_date)
-                )
-            )
-            payments = list(
-                session.scalars(
-                    select(Payment)
-                    .where(
-                        Payment.employee_id == employee_id,
-                        Payment.payment_date.between(date_from, date_to),
-                        Payment.voided_at.is_(None),
-                    )
-                    .order_by(Payment.payment_date)
-                )
-            )
-            return attendance, payments
-
-    def object_report(self, object_id: str, date_from: date, date_to: date):
-        with self.sessions() as session:
-            obj = session.get(WorkObject, object_id)
-            if obj is None:
-                raise NotFound("Объект не найден.")
-            rows = session.execute(
-                select(
-                    Employee.name,
-                    Attendance.currency,
-                    func.sum(Attendance.coefficient),
-                    func.sum(Attendance.earned_amount),
-                )
-                .join(Employee, Employee.id == Attendance.employee_id)
-                .where(
-                    Attendance.object_id == object_id,
-                    Attendance.work_date.between(date_from, date_to),
-                    Attendance.voided_at.is_(None),
-                )
-                .group_by(Employee.id, Employee.name, Attendance.currency)
-                .order_by(Employee.name)
-            ).all()
-            return obj, rows
 
 
 class AccessService:

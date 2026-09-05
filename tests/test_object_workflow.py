@@ -224,6 +224,20 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             )
             await dispatcher.feed_update(bot, event)
 
+        def action(prefix):
+            markup = next(
+                call.reply_markup
+                for call in reversed(bot.calls)
+                if getattr(call, "reply_markup", None)
+                and hasattr(call.reply_markup, "inline_keyboard")
+            )
+            return next(
+                button.callback_data
+                for row in markup.inline_keyboard
+                for button in row
+                if button.callback_data.startswith(prefix)
+            )
+
         async def create_object(name):
             await send("🏗 Объекты")
             await click("obj:create")
@@ -246,7 +260,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         )
         assert len(object_screen.reply_markup.inline_keyboard) == 5
         await click(f"teamopen:{first}")
-        await click("team:add")
+        await click(action("teamadd:"))
         await click("emp:create")
         await send("Иванов Иван Иванович")
         await send("Тестовый банк, СБП +79990000000")
@@ -254,7 +268,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert "Проверьте карточку" in bot.calls[-1].text
         with sessions() as session:
             assert session.scalar(select(func.count()).select_from(Employee)) == 0
-        await click("person:save")
+        await click(action("personsave:"))
         with sessions() as session:
             employee = session.scalar(select(Employee))
             assert employee.phone is None
@@ -262,22 +276,22 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert team.roster(first)[0][2] == 0
         second = await create_object("Второй объект")
         await click(f"teamopen:{second}")
-        await click("team:add")
-        await click(f"attach:{employee.id}")
+        await click(action("teamadd:"))
+        await click(action(f"attach:{employee.id}:"))
         await send("3500")
-        await click("person:save")
+        await click(action("personsave:"))
         with sessions() as session:
             assert session.scalar(select(func.count()).select_from(Employee)) == 1
             assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 2
 
         await click(f"shift:{first}")
-        await click(f"toggle:{employee.id}")
-        await click("team:add")
+        await click(action(f"toggle:{employee.id}:"))
+        await click(action("teamadd:"))
         await click("emp:create")
         await send("Петров Пётр Петрович")
         await click("person:skipdetails")
         await click("person:skiprate")
-        await click("person:save")
+        await click(action("personsave:"))
         assert "Отметьте пришедших" in bot.calls[-1].text
         assert (
             sum(
@@ -287,12 +301,13 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             )
             == 2
         )
-        await click("shift:preview")
+        await click(action("shift:preview:"))
         assert "Иванов" in bot.calls[-1].text and "Петров" in bot.calls[-1].text
-        await click("shift:save")
+        saved_confirmation = action("shiftsave:")
+        await click(saved_confirmation)
         assert [count for _, _, count in team.roster(first)] == [1, 1]
         assert team.roster(second)[0][2] == 0
-        await click("shift:save")  # stale confirmation cannot add more shifts
+        await click(saved_confirmation)  # stale confirmation cannot add more shifts
         assert [count for _, _, count in team.roster(first)] == [1, 1]
 
         await click(f"shift:{second}")
@@ -307,9 +322,10 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             )
             == 1
         )
-        await click(f"toggle:{employee.id}")
-        await click("shift:preview")
-        await click("shift:save")
+        await click(action(f"toggle:{employee.id}:"))
+        await click(action("shift:preview:"))
+        saved_confirmation = action("shiftsave:")
+        await click(saved_confirmation)
         assert team.roster(second)[0][2] == 1
         day = datetime.now(UTC).date()
         assert next(
@@ -329,25 +345,25 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         await click(f"member:{member.id}")
         assert len(bot.calls[-1].reply_markup.inline_keyboard) == 4
         await click(f"memberlog:{member.id}")
-        await click("member:history")
+        await click(f"shifts:{member.id}:0")
         assert "История смен" in bot.calls[-1].text
         row = next(row for row in team.day(first, day) if row.employee_id == employee.id)
         await click(f"undo:{row.id}")
         assert attendance.get(row.id).voided_at is None
-        await click("undo:confirm")
+        await click(f"undook:{row.id}")
         assert attendance.get(row.id).voided_at is not None
         assert next(count for _, emp, count in team.roster(first) if emp.id == employee.id) == 0
         assert team.roster(second)[0][2] == 1
-        await click("teamcsv")
+        await click(f"teamcsv:{first}")
         assert b"\xd0\xa1\xd0\xbc\xd0\xb5\xd0\xbd\xd1\x8b" in bot.calls[-1].document.data
 
         await click(f"empedit:{employee.id}")
-        await click("personfield:payment_details")
+        await click(f"personfield:payment_details:{employee.id}")
         await send("-")
         assert employees.get(employee.id).payment_details is None
         await click(f"member:{member.id}")
         await click(f"membermore:{member.id}")
-        await click("member:rate")
+        await click(f"memberrate:{member.id}")
         await send("2500")
         assert team.get(member.id).shift_rate == Decimal(2500)
         await click(f"shift:{first}", user=9999)
@@ -357,29 +373,29 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
 
         await click(f"obj:{first}")
         await click(f"objsettings:{first}")
-        await click("objectfield:description")
+        await click(f"objectfield:description:{first}")
         await send("Описание объекта")
-        await click("objectfield:comment")
+        await click(f"objectfield:comment:{first}")
         await send("Примечание объекта")
-        await click("objectfield:start_date")
+        await click(f"objectfield:start_date:{first}")
         await send("01.01.2020")
         with sessions() as session:
             obj = session.get(WorkObject, first)
             assert obj.description == "Описание объекта"
             assert obj.comment == "Примечание объекта"
             assert obj.start_date == date(2020, 1, 1)
-        await click("objectfield:start_date")
+        await click(f"objectfield:start_date:{first}")
         await send("01.01.2099")
         assert "позже существующих смен" in bot.calls[-1].text
         await send("/cancel")
         await click(f"empedit:{employee.id}")
-        await click("personfield:comment")
+        await click(f"personfield:comment:{employee.id}")
         await send("Примечание сотрудника")
-        await click("personfield:start_date")
+        await click(f"personfield:start_date:{employee.id}")
         await send("01.01.2020")
         assert employees.get(employee.id).comment == "Примечание сотрудника"
         assert employees.get(employee.id).start_date == date(2020, 1, 1)
-        await click("personfield:start_date")
+        await click(f"personfield:start_date:{employee.id}")
         await send("01.01.2099")
         assert "позже существующих смен" in bot.calls[-1].text
         await send("/cancel")
@@ -435,14 +451,6 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             assert session.scalar(select(func.count()).select_from(Attendance)) == 3
             assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 3
 
-        def action(prefix):
-            return next(
-                button.callback_data
-                for row in bot.calls[-1].reply_markup.inline_keyboard
-                for button in row
-                if button.callback_data.startswith(prefix)
-            )
-
         await click(f"member:{member.id}")
         assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
         await click(f"pay:{member.id}")
@@ -487,7 +495,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         await click(f"shift:{first}")
         picker = next(call for call in reversed(bot.calls) if getattr(call, "reply_markup", None))
         assert not any(
-            button.callback_data == f"toggle:{employee.id}"
+            button.callback_data.startswith(f"toggle:{employee.id}:")
             for row in picker.reply_markup.inline_keyboard
             for button in row
         )
@@ -513,11 +521,11 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         await click(f"member:{other_member.id}")
         assert "Выплачено: 500.00 RUB" in bot.calls[-1].text
         await click(f"member:{member.id}")
-        await click("teamcsv")
+        await click(f"teamcsv:{first}")
         assert "Выплачено" in bot.calls[-1].document.data.decode("utf-8-sig")
         await click(f"shift:{first}")
-        await click(f"toggle:{employee.id}")
-        await click("shift:date")
+        await click(action(f"toggle:{employee.id}:"))
+        await click(action("shift:date:"))
         await click("shiftdate:yesterday")
         picker = next(call for call in reversed(bot.calls) if getattr(call, "reply_markup", None))
         assert not any(
@@ -525,11 +533,11 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             for row in picker.reply_markup.inline_keyboard
             for button in row
         )
-        await click("shift:date")
+        await click(action("shift:date:"))
         await click("shiftdate:custom")
         await send(datetime.now(UTC).strftime("%d.%m.%Y"))
         assert "Отметьте пришедших" in bot.calls[-1].text
-        await click("team:add")
+        await click(action("teamadd:"))
         await click("add:back")
         assert "Отметьте пришедших" in bot.calls[-1].text
         await click(f"pay:{member.id}")
@@ -540,7 +548,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert "Второй объект" in bot.calls[-1].text
         await click(f"reportobj:{first}")
         assert "Первый объект" in bot.calls[-1].text
-        await click("teamxlsx")
+        await click(f"teamxlsx:{first}")
         assert bot.calls[-1].document.filename == f"shifts-{first}.xlsx"
         await click(f"membership:0:{member.id}", user=9999)
         await click(remove_confirm, user=9999)

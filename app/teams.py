@@ -158,6 +158,24 @@ class TeamService:
                 )
             )
 
+    def unrated(self, member_id: str):
+        member = self.get(member_id)
+        with self.sessions() as session:
+            return list(
+                session.scalars(
+                    select(Attendance)
+                    .where(
+                        Attendance.object_id == member.object_id,
+                        Attendance.employee_id == member.employee_id,
+                        Attendance.voided_at.is_(None),
+                        Attendance.rate_snapshot.is_(None),
+                        Attendance.earned_amount.is_(None),
+                    )
+                    .order_by(Attendance.work_date)
+                    .limit(20)
+                )
+            )
+
     def history(self, object_id: str, employee_id: str, *, offset=0):
         with self.sessions() as session:
             return list(

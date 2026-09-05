@@ -6,48 +6,11 @@ from io import BytesIO, StringIO
 
 from openpyxl import Workbook
 
-from .services import PayrollSummary
-
-HEADERS = ["Сотрудник", "Дни", "Начислено", "Выплачено", "Баланс периода", "Валюта"]
-
 
 def spreadsheet_safe(value):
     if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
         return f"'{value}"
     return value
-
-
-def summary_rows(items: list[PayrollSummary]) -> list[list[str]]:
-    return [
-        [
-            item.employee_name,
-            str(item.days),
-            str(item.earned),
-            str(item.paid),
-            str(item.balance),
-            item.currency,
-        ]
-        for item in items
-    ]
-
-
-def summaries_csv(items: list[PayrollSummary]) -> bytes:
-    return table_csv(HEADERS, summary_rows(items))
-
-
-def summaries_xlsx(items: list[PayrollSummary]) -> bytes:
-    rows = [
-        [
-            item.employee_name,
-            item.days,
-            item.earned,
-            item.paid,
-            item.balance,
-            item.currency,
-        ]
-        for item in items
-    ]
-    return table_xlsx("Зарплаты", HEADERS, rows)
 
 
 def table_csv(headers: list[str], rows: list[list]) -> bytes:

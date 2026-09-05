@@ -39,6 +39,13 @@ never recalculated. Rates can be omitted. If a historical shift has no rate,
 the employee's object card shows how many shifts lack a rate, sums only known
 earnings and does not present an incomplete balance as a final amount.
 
+Use **Данные и настройки → Смены без ставки** to select a date, enter its rate
+and confirm the missing accrual. This fills only that previously unrated shift;
+it cannot overwrite an existing calculation or price a cancelled record. The
+current rate on the object is unchanged. Calculated shifts leave this task list
+but remain in the complete shift history and lifetime counter. Payments also
+never remove shifts from history or reduce the number of worked shifts.
+
 ## Payments and balances by object
 
 Open **Сотрудники объекта**, then select an employee. The card shows earnings,
@@ -143,6 +150,8 @@ without such history remain in the shared database for manual assignment.
 Tests cover the full object-first dialog, creation during attendance marking,
 separate object rates/counts, duplicate prevention, cancellation, employee access
 boundaries, and migration of existing cards and financial history.
+Regression checks cover old keyboards from another object, mismatched save and
+cancellation confirmations, and preservation of shift counts after full payment.
 
 ## Backups
 

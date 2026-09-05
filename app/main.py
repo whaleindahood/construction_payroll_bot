@@ -9,8 +9,8 @@ from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import CallbackQuery, Message, Update
 
+from app.bot.common import Services
 from app.bot.employee import build_employee_router
-from app.bot.handlers import Services
 from app.bot.object_workflow import build_router
 from app.config import Settings
 from app.db import make_session_factory
@@ -21,7 +21,6 @@ from app.services import (
     ObjectService,
     PaymentService,
     PayrollService,
-    ReportService,
     UpdateDedupService,
 )
 
@@ -93,7 +92,6 @@ def compose(settings: Settings) -> tuple[Bot, Dispatcher]:
         attendance=attendance,
         payroll=payroll,
         payments=PaymentService(sessions),
-        reports=ReportService(sessions, payroll),
     )
     bot = Bot(settings.bot_token)
     dispatcher = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
@@ -105,7 +103,6 @@ def compose(settings: Settings) -> tuple[Bot, Dispatcher]:
         build_router(
             services,
             timezone_name=settings.timezone,
-            default_currency=settings.default_currency,
         )
     )
     dispatcher.include_router(build_employee_router(employees))

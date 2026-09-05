@@ -9,7 +9,6 @@ from app.services import (
     ObjectService,
     PaymentService,
     PayrollService,
-    ReportService,
 )
 
 
@@ -25,5 +24,4 @@ def services(tmp_path):
         "attendance": AttendanceService(sessions),
         "payroll": payroll,
         "payments": PaymentService(sessions),
-        "reports": ReportService(sessions, payroll),
     }

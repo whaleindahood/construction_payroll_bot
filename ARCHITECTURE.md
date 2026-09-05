@@ -16,8 +16,8 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
   expose payment, history and data/settings. Former members have a separate list.
 - Employee creation asks for full name, optional payment details and optional
   object rate. Phone and Telegram ID are edited later through personal data.
-- Existing payroll dialogs in `app/bot/handlers.py` are no longer registered;
-  their shared helpers and financial services remain for historical compatibility.
+- The old payroll router, its keyboards and global report helpers have been
+  removed. Common dialog helpers live in `app/bot/common.py`.
 
 ## Persistent records
 
@@ -46,6 +46,8 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 4. Confirmation is required for card creation, shifts and shift cancellation.
 5. Per-object rates are optional. Missing rates produce NULL snapshots, not an
    invented zero or placeholder salary. Updating a rate never changes old rows.
+   An explicit, confirmed action may fill an unrated shift. A conditional UPDATE
+   rejects already priced or cancelled rows and records the change in the audit.
 6. Cancellation retains the original row and writes an audit record.
 7. Employee access resolves only by Telegram ID in private chats; owner routes
    are gated independently. Employees cannot access another person's profile.
@@ -56,14 +58,17 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 10. Object balances use only that employee's noncancelled attendance and payments
     on that object. Removed members can still receive payments. An unrated shift
     makes the displayed balance incomplete; its earnings are never invented.
-11. Payment saves/cancellations and membership changes require a confirmation
-    token bound to the current form. Payment saves also use a database unique
-    idempotency key. Old confirmation buttons cannot approve a different form.
+11. Saves and cancellations are bound to the specific form or record. Shift
+    pickers use a per-screen token; card editing and exports carry the original
+    entity ID. Old confirmation buttons cannot approve a different operation.
+12. Payments affect balances only. All noncancelled shifts remain in lifetime
+    counts and history, including after full settlement.
 
 ## Main modules
 
 - `app/bot/object_workflow.py`: active owner dialogs and shift exports.
 - `app/bot/employee.py`: invitation acceptance and personal profile editing.
+- `app/bot/common.py`: service bundle, date parsing and long-message handling.
 - `app/teams.py`: object membership, rates, shift counts and history queries.
 - `app/services.py`: employee/object services, attendance and payment ledgers,
   object-filtered payroll summaries and audit. Legacy global summaries remain
