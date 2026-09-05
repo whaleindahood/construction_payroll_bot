@@ -119,6 +119,7 @@ class PayrollSummary:
     days: Decimal
     earned: Decimal
     paid: Decimal
+    unrated_shifts: int = 0
 
     @property
     def balance(self) -> Decimal:
@@ -621,6 +622,10 @@ class AttendanceService:
             )
         )
         if member is not None:
+            if not member.active:
+                raise DomainError(
+                    "Сотрудник убран из состава объекта. Сначала верните его в состав."
+                )
             employee = session.get(Employee, employee_id)
             if work_date < employee.start_date:
                 raise DomainError("Смена не может быть раньше начала работы сотрудника.")
@@ -848,6 +853,7 @@ class PayrollService:
         self,
         employee_id: str,
         *,
+        object_id: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> PayrollSummary:
@@ -860,16 +866,20 @@ class PayrollService:
                 Attendance.voided_at.is_(None),
             ]
             payment_filters = [Payment.employee_id == employee_id, Payment.voided_at.is_(None)]
+            if object_id is not None:
+                attendance_filters.append(Attendance.object_id == object_id)
+                payment_filters.append(Payment.object_id == object_id)
             if date_from:
                 attendance_filters.append(Attendance.work_date >= date_from)
                 payment_filters.append(Payment.payment_date >= date_from)
             if date_to:
                 attendance_filters.append(Attendance.work_date <= date_to)
                 payment_filters.append(Payment.payment_date <= date_to)
-            days, earned = session.execute(
+            days, earned, unrated = session.execute(
                 select(
                     func.coalesce(func.sum(Attendance.coefficient), 0),
                     func.coalesce(func.sum(Attendance.earned_amount), 0),
+                    func.count() - func.count(Attendance.earned_amount),
                 ).where(*attendance_filters)
             ).one()
             paid = session.scalar(
@@ -882,6 +892,7 @@ class PayrollService:
                 days=Decimal(days or 0),
                 earned=as_money(earned),
                 paid=as_money(paid),
+                unrated_shifts=unrated,
             )
 
     def all_summaries(
@@ -1006,6 +1017,22 @@ class PaymentService:
             if row is None:
                 raise NotFound("Выплата не найдена.")
             return row
+
+    def history(self, employee_id: str, object_id: str, *, offset=0):
+        with self.sessions() as session:
+            return list(
+                session.scalars(
+                    select(Payment)
+                    .where(
+                        Payment.employee_id == employee_id,
+                        Payment.object_id == object_id,
+                        Payment.voided_at.is_(None),
+                    )
+                    .order_by(Payment.payment_date.desc(), Payment.created_at.desc(), Payment.id)
+                    .offset(offset)
+                    .limit(20)
+                )
+            )
 
 
 class ReportService:

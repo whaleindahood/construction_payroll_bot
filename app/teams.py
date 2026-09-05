@@ -23,13 +23,25 @@ class TeamService:
                     raise NotFound("Активный объект не найден.")
                 if employee is None or employee.status != "active":
                     raise NotFound("Активный сотрудник не найден.")
-                row = ObjectEmployee(object_id=object_id, employee_id=employee_id, shift_rate=rate)
-                session.add(row)
+                row = session.scalar(
+                    select(ObjectEmployee).where(
+                        ObjectEmployee.object_id == object_id,
+                        ObjectEmployee.employee_id == employee_id,
+                    )
+                )
+                if row is not None and row.active:
+                    raise Conflict("Сотрудник уже добавлен на этот объект.")
+                restored = row is not None
+                if row is None:
+                    row = ObjectEmployee(object_id=object_id, employee_id=employee_id)
+                    session.add(row)
+                row.active = True
+                row.shift_rate = rate
                 session.flush()
                 audit(
                     session,
                     actor,
-                    "employee_added_to_object",
+                    "employee_returned_to_object" if restored else "employee_added_to_object",
                     "object_employee",
                     row.id,
                     after={"object_id": object_id, "employee_id": employee_id},
@@ -63,10 +75,33 @@ class TeamService:
                 after={"rate": str(value)},
             )
 
+    def set_active(self, member_id: str, active: bool, *, actor: int):
+        with self.sessions() as session, session.begin():
+            member = session.get(ObjectEmployee, member_id)
+            if member is None:
+                raise NotFound("Сотрудник не найден в составе объекта.")
+            if active:
+                obj = session.get(WorkObject, member.object_id)
+                employee = session.get(Employee, member.employee_id)
+                if obj.status != "active" or employee.status != "active":
+                    raise Conflict("Сначала восстановите объект и карточку сотрудника.")
+            if member.active == active:
+                return
+            member.active = active
+            audit(
+                session,
+                actor,
+                "object_membership_changed",
+                "object_employee",
+                member.id,
+                before={"active": not active},
+                after={"active": active},
+            )
+
     def available(self, object_id: str):
         with self.sessions() as session:
             assigned = select(ObjectEmployee.employee_id).where(
-                ObjectEmployee.object_id == object_id
+                ObjectEmployee.object_id == object_id, ObjectEmployee.active.is_(True)
             )
             return list(
                 session.scalars(
@@ -76,7 +111,7 @@ class TeamService:
                 )
             )
 
-    def roster(self, object_id: str):
+    def roster(self, object_id: str, *, active_only=False):
         with self.sessions() as session:
             counts = (
                 select(Attendance.employee_id, func.count().label("shifts"))
@@ -84,13 +119,16 @@ class TeamService:
                 .group_by(Attendance.employee_id)
                 .subquery()
             )
-            return session.execute(
+            query = (
                 select(ObjectEmployee, Employee, func.coalesce(counts.c.shifts, 0))
                 .join(Employee, Employee.id == ObjectEmployee.employee_id)
                 .outerjoin(counts, counts.c.employee_id == Employee.id)
                 .where(ObjectEmployee.object_id == object_id)
                 .order_by(Employee.name)
-            ).all()
+            )
+            if active_only:
+                query = query.where(ObjectEmployee.active.is_(True), Employee.status == "active")
+            return session.execute(query).all()
 
     def employee_objects(self, employee_id: str):
         with self.sessions() as session:

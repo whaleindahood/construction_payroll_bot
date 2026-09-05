@@ -52,6 +52,19 @@ class DeleteForm(StatesGroup):
     confirm = State()
 
 
+class MembershipForm(StatesGroup):
+    confirm = State()
+
+
+class ObjectPaymentForm(StatesGroup):
+    amount = State()
+    date = State()
+    custom_date = State()
+    comment = State()
+    confirm = State()
+    void = State()
+
+
 def buttons(*items):
     builder = InlineKeyboardBuilder()
     for label, callback in items:
@@ -125,8 +138,9 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         ]
         text.extend(
             f"{employee.name} — {count} смен"
+            + (" (убран из состава)" if not member.active else "")
             + (" (неактивен)" if employee.status != "active" else "")
-            for _, employee, count in rows
+            for member, employee, count in rows
         )
         if not rows:
             text.append("Сотрудников пока нет. Добавьте из базы или создайте карточку.")
@@ -140,7 +154,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             text.append("Объект закрыт для новых смен.")
         actions += [
             ("👷 Состав и история смен", "team:list"),
-            ("📊 Скачать счетчики смен", "team:export"),
+            ("📊 Скачать смены и расчёты", "team:export"),
         ]
         if obj.status == "archived":
             actions.append(("♻️ Восстановить объект", f"restore:obj:{obj.id}"))
@@ -671,7 +685,10 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             f"Состав объекта «{obj.name}». Выберите сотрудника:",
             reply_markup=buttons(
                 *[
-                    (f"{emp.name} — {count} смен", f"member:{member.id}")
+                    (
+                        f"{emp.name} — {count} смен" + (" · убран" if not member.active else ""),
+                        f"member:{member.id}",
+                    )
                     for member, emp, count in rows
                 ],
                 ("← Объект", "cancel"),
@@ -680,22 +697,230 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
 
     @router.callback_query(F.data.regexp(r"^member:[0-9a-f-]{36}$"))
     async def member_card(callback: CallbackQuery, state: FSMContext):
-        member = team.get(callback.data.split(":", 1)[1])
+        await callback.answer()
+        await show_member(callback.message, state, callback.data.split(":", 1)[1])
+
+    async def show_member(message, state, member_id):
+        member = team.get(member_id)
         employee = services.employees.get(member.employee_id)
         obj = services.objects.get(member.object_id)
         count = next(count for row, _, count in team.roster(obj.id) if row.id == member.id)
         await state.clear()
         await state.update_data(object_id=obj.id, member_id=member.id)
-        await callback.answer()
-        await callback.message.answer(
-            f"{employee.name}\nОбъект: {obj.name}\nСмен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}",
+        summary = services.payroll.summary(employee.id, object_id=obj.id)
+        balance = (
+            f"Осталось выплатить: {summary.balance} {summary.currency}"
+            if summary.balance >= 0
+            else f"Аванс: {-summary.balance} {summary.currency}"
+        )
+        if summary.unrated_shifts:
+            balance = (
+                f"Смен без ставки: {summary.unrated_shifts}. Итоговый остаток пока не определён."
+            )
+        await message.answer(
+            f"{employee.name}\nОбъект: {obj.name}\n"
+            f"Состав: {'работает на объекте' if member.active else 'убран из состава'}\n"
+            f"Смен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}\n\n"
+            f"За всё время на этом объекте:\n"
+            f"Начислено{' по сменам со ставкой' if summary.unrated_shifts else ''}: {summary.earned} {summary.currency}\n"
+            f"Выплачено: {summary.paid} {summary.currency}\n{balance}",
             reply_markup=buttons(
                 ("📋 Карточка сотрудника", f"emp:{employee.id}"),
                 ("📅 История смен", "member:history"),
                 ("Изменить стоимость смены", "member:rate"),
+                ("💵 Записать выплату / аванс", f"pay:{member.id}"),
+                ("История выплат", f"pays:{member.id}:0"),
+                (
+                    "Убрать из состава" if member.active else "Вернуть в состав",
+                    f"membership:{int(not member.active)}:{member.id}",
+                ),
                 ("← Объект", "cancel"),
             ),
         )
+
+    @router.callback_query(F.data.regexp(r"^membership:[01]:[0-9a-f-]{36}$"))
+    async def membership_preview(callback: CallbackQuery, state: FSMContext):
+        _, active, member_id = callback.data.split(":")
+        member = team.get(member_id)
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        token = str(uuid.uuid4())
+        await state.clear()
+        await state.update_data(
+            object_id=obj.id, member_id=member_id, active=active == "1", token=token
+        )
+        await state.set_state(MembershipForm.confirm)
+        await callback.answer()
+        await callback.message.answer(
+            f"{'Вернуть' if active == '1' else 'Убрать'} {employee.name} "
+            f"{'в состав' if active == '1' else 'из состава'} объекта «{obj.name}»?\n"
+            "Карточка, ставка, смены и выплаты сохранятся. Другие объекты не изменятся.",
+            reply_markup=buttons(
+                ("Подтвердить", f"membershipok:{token}"), ("Отмена", f"member:{member_id}")
+            ),
+        )
+
+    @router.callback_query(MembershipForm.confirm, F.data.startswith("membershipok:"))
+    async def membership_save(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["token"]:
+            raise DomainError("Это подтверждение устарело. Откройте карточку заново.")
+        team.set_active(data["member_id"], data["active"], actor=callback.from_user.id)
+        await callback.answer("Состав изменён")
+        await show_member(callback.message, state, data["member_id"])
+
+    @router.callback_query(F.data.regexp(r"^pay:[0-9a-f-]{36}$"))
+    async def payment_start(callback: CallbackQuery, state: FSMContext):
+        member = team.get(callback.data.split(":", 1)[1])
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        await state.clear()
+        await state.update_data(object_id=obj.id, member_id=member.id)
+        await state.set_state(ObjectPaymentForm.amount)
+        await callback.answer()
+        await callback.message.answer(
+            f"Выплата / аванс: {employee.name}, объект «{obj.name}».\n"
+            f"Введите выплаченную сумму в {employee.currency}. Для отмены — /cancel."
+        )
+
+    @router.message(ObjectPaymentForm.amount)
+    async def payment_amount(message: Message, state: FSMContext):
+        await state.update_data(amount=str(money(message.text)))
+        await state.set_state(ObjectPaymentForm.date)
+        await message.answer("Дата выплаты:", reply_markup=kb.dates("paydate"))
+
+    async def payment_date_selected(message, state, payment_date):
+        if payment_date > today():
+            raise DomainError("Нельзя записать выплату будущей датой.")
+        await state.update_data(payment_date=payment_date.isoformat())
+        await state.set_state(ObjectPaymentForm.comment)
+        await message.answer("Комментарий к выплате или авансу, либо «-», чтобы пропустить:")
+
+    @router.callback_query(ObjectPaymentForm.date, F.data.startswith("paydate:"))
+    async def payment_date(callback: CallbackQuery, state: FSMContext):
+        choice = callback.data.split(":", 1)[1]
+        if choice == "custom":
+            await state.set_state(ObjectPaymentForm.custom_date)
+            await callback.message.answer("Введите дату ДД.ММ.ГГГГ:")
+        elif choice in {"today", "yesterday"}:
+            await payment_date_selected(
+                callback.message, state, today() - timedelta(days=choice == "yesterday")
+            )
+        else:
+            raise DomainError("Неизвестная дата.")
+        await callback.answer()
+
+    @router.message(ObjectPaymentForm.custom_date)
+    async def payment_custom_date(message: Message, state: FSMContext):
+        await payment_date_selected(message, state, parse_date(message.text))
+
+    @router.message(ObjectPaymentForm.comment)
+    async def payment_preview(message: Message, state: FSMContext):
+        comment = optional(message.text, "Комментарий", 1000)
+        data = await state.get_data()
+        member = team.get(data["member_id"])
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        token = str(uuid.uuid4())
+        await state.update_data(comment=comment, token=token)
+        await state.set_state(ObjectPaymentForm.confirm)
+        await message.answer(
+            f"Записать выплату?\n{employee.name}\nОбъект: {obj.name}\n"
+            f"Сумма: {data['amount']} {employee.currency}\n"
+            f"Дата: {date.fromisoformat(data['payment_date']):%d.%m.%Y}\n"
+            f"Комментарий: {comment or '—'}",
+            reply_markup=buttons(
+                ("Записать выплату", f"payok:{token}"), ("Отмена", f"member:{member.id}")
+            ),
+        )
+
+    @router.callback_query(ObjectPaymentForm.confirm, F.data.startswith("payok:"))
+    async def payment_save(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["token"]:
+            raise DomainError("Это подтверждение устарело. Проверьте текущую выплату.")
+        member = team.get(data["member_id"])
+        payment_date = date.fromisoformat(data["payment_date"])
+        if payment_date > today():
+            raise DomainError("Нельзя записать выплату будущей датой.")
+        services.payments.create(
+            employee_id=member.employee_id,
+            object_id=member.object_id,
+            amount=data["amount"],
+            payment_date=payment_date,
+            method="other",
+            comment=data["comment"],
+            actor=callback.from_user.id,
+            idempotency_key=f"object-payment:{data['token']}",
+        )
+        await callback.answer("Выплата записана")
+        await show_member(callback.message, state, member.id)
+
+    @router.callback_query(F.data.regexp(r"^pays:[0-9a-f-]{36}:[0-9]{1,8}$"))
+    async def payment_history(callback: CallbackQuery, state: FSMContext):
+        _, member_id, offset = callback.data.split(":")
+        member = team.get(member_id)
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        rows = services.payments.history(member.employee_id, member.object_id, offset=int(offset))
+        await state.clear()
+        await state.update_data(object_id=obj.id, member_id=member.id)
+        actions = [
+            (f"{row.payment_date:%d.%m.%Y} · {row.amount} {row.currency}", f"payvoid:{row.id}")
+            for row in rows
+        ]
+        if int(offset):
+            actions.append(("Предыдущие 20", f"pays:{member.id}:{max(0, int(offset) - 20)}"))
+        if len(rows) == 20:
+            actions.append(("Следующие 20", f"pays:{member.id}:{int(offset) + 20}"))
+        actions.append(("← Карточка на объекте", f"member:{member.id}"))
+        await callback.answer()
+        await callback.message.answer(
+            f"Выплаты: {employee.name}, объект «{obj.name}».\n"
+            + ("Выберите запись для просмотра и отмены ошибки." if rows else "Записей нет."),
+            reply_markup=buttons(*actions),
+        )
+
+    @router.callback_query(F.data.regexp(r"^payvoid:[0-9a-f-]{36}$"))
+    async def payment_void_preview(callback: CallbackQuery, state: FSMContext):
+        row = services.payments.get(callback.data.split(":", 1)[1])
+        if row.object_id is None or row.voided_at:
+            raise DomainError("Выплата без объекта или уже отменена.")
+        member = next(
+            (member for member, emp, _ in team.roster(row.object_id) if emp.id == row.employee_id),
+            None,
+        )
+        if member is None:
+            raise DomainError("Карточка сотрудника на объекте не найдена.")
+        employee = services.employees.get(row.employee_id)
+        obj = services.objects.get(row.object_id)
+        token = str(uuid.uuid4())
+        await state.clear()
+        await state.update_data(
+            object_id=obj.id, member_id=member.id, payment_id=row.id, token=token
+        )
+        await state.set_state(ObjectPaymentForm.void)
+        await callback.answer()
+        await callback.message.answer(
+            f"{employee.name}\nОбъект: {obj.name}\nВыплата: {row.amount} {row.currency}\n"
+            f"Дата: {row.payment_date:%d.%m.%Y}\nКомментарий: {row.comment or '—'}\n\n"
+            "Отменить ошибочную запись? Остаток будет пересчитан.",
+            reply_markup=buttons(
+                ("Подтвердить отмену выплаты", f"payvoidok:{token}"),
+                ("Назад", f"pays:{member.id}:0"),
+            ),
+        )
+
+    @router.callback_query(ObjectPaymentForm.void, F.data.startswith("payvoidok:"))
+    async def payment_void_save(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        if callback.data.split(":", 1)[1] != data["token"]:
+            raise DomainError("Это подтверждение устарело. Выберите выплату заново.")
+        services.payments.void(
+            data["payment_id"], actor=callback.from_user.id, reason="Исправление выплаты владельцем"
+        )
+        await callback.answer("Запись выплаты отменена")
+        await show_member(callback.message, state, data["member_id"])
 
     @router.callback_query(F.data == "member:rate")
     async def member_rate(callback: CallbackQuery, state: FSMContext):
@@ -737,7 +962,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         recorded = {row.employee_id for row in team.day(obj.id, work_date)}
         rows = [
             (member, emp, count)
-            for member, emp, count in team.roster(obj.id)
+            for member, emp, count in team.roster(obj.id, active_only=True)
             if emp.status == "active" and emp.start_date <= work_date
         ]
         selected = set(data.get("employee_ids", [])) & {emp.id for _, emp, _ in rows} - recorded
@@ -784,7 +1009,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     async def toggle(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         employee_id = callback.data.split(":", 1)[1]
-        allowed = {emp.id for _, emp, _ in team.roster(data["object_id"]) if emp.status == "active"}
+        allowed = {emp.id for _, emp, _ in team.roster(data["object_id"], active_only=True)}
         if employee_id not in allowed:
             raise DomainError("Сотрудник не входит в состав объекта.")
         selected = set(data.get("employee_ids", []))
@@ -916,7 +1141,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     async def export_menu(callback: CallbackQuery):
         await callback.answer()
         await callback.message.answer(
-            "Счетчики смен по сотрудникам за все время на выбранном объекте:",
+            "Смены, начисления и выплаты по сотрудникам за всё время на выбранном объекте:",
             reply_markup=buttons(("CSV", "teamcsv"), ("XLSX", "teamxlsx")),
         )
 
@@ -924,13 +1149,33 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     async def export(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         obj = services.objects.get(data.get("object_id", ""))
-        rows = [[emp.name, count] for _, emp, count in team.roster(obj.id)]
+        rows = []
+        for member, emp, count in team.roster(obj.id):
+            summary = services.payroll.summary(emp.id, object_id=obj.id)
+            rows.append(
+                [
+                    emp.name,
+                    count,
+                    "В составе" if member.active else "Убран из состава",
+                    summary.currency,
+                    summary.earned,
+                    summary.paid,
+                    "Не определён" if summary.unrated_shifts else summary.balance,
+                    summary.unrated_shifts,
+                ]
+            )
+        headers = [
+            "Сотрудник",
+            "Смены",
+            "Состав",
+            "Валюта",
+            "Начислено по сменам со ставкой",
+            "Выплачено",
+            "Остаток (минус — аванс)",
+            "Смен без ставки",
+        ]
         kind = "csv" if callback.data == "teamcsv" else "xlsx"
-        payload = (
-            table_csv(["Сотрудник", "Смены"], rows)
-            if kind == "csv"
-            else table_xlsx(obj.name, ["Сотрудник", "Смены"], rows)
-        )
+        payload = table_csv(headers, rows) if kind == "csv" else table_xlsx(obj.name, headers, rows)
         await callback.answer()
         await callback.message.answer_document(
             BufferedInputFile(payload, filename=f"shifts-{obj.id}.{kind}")

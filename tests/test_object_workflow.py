@@ -91,6 +91,88 @@ def test_roster_required_and_rate_optional(services):
     assert team.available(obj.id) == []
 
 
+def test_membership_removal_preserves_separate_balances_and_history(services):
+    team = TeamService(services["sessions"])
+    employee = services["employees"].create(
+        name="Иван", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+    )
+    first, second = [
+        services["objects"].create(name=name, start_date=date(2026, 1, 1), actor=1001)
+        for name in ("Дом", "Школа")
+    ]
+    member = team.add(first.id, employee.id, shift_rate="2000", actor=1001)
+    team.add(second.id, employee.id, shift_rate="3500", actor=1001)
+    args = {
+        "employee_ids": [employee.id],
+        "work_date": date(2026, 1, 2),
+        "coefficient": "1",
+        "require_assignment": True,
+        "actor": 1001,
+    }
+    first_shift = services["attendance"].create_bulk(
+        **args, object_id=first.id, operation_key="one"
+    )[0]
+    services["attendance"].create_bulk(**args, object_id=second.id, operation_key="two")
+    payment_args = {
+        "employee_id": employee.id,
+        "payment_date": date(2026, 1, 2),
+        "method": "bank",
+        "actor": 1001,
+    }
+    payment = services["payments"].create(
+        **payment_args, object_id=first.id, amount="500", idempotency_key="paid-one"
+    )
+    services["payments"].create(
+        **payment_args, object_id=second.id, amount="4000", idempotency_key="advance-two"
+    )
+    # Historical payments without an object must never offset a particular object's debt.
+    services["payments"].create(**payment_args, amount="9999", idempotency_key="legacy-unallocated")
+    team.set_active(member.id, False, actor=1001)
+    assert team.roster(first.id, active_only=True) == []
+    assert team.roster(first.id)[0][2] == 1
+    assert team.roster(second.id, active_only=True)[0][2] == 1
+    assert services["employees"].get(employee.id).status == "active"
+    assert employee.id in {row.id for row in team.available(first.id)}
+    summary = services["payroll"].summary(employee.id, object_id=first.id)
+    assert (summary.earned, summary.paid, summary.balance) == (2000, 500, 1500)
+    assert services["payroll"].summary(employee.id, object_id=second.id).balance == -500
+    assert team.history(first.id, employee.id)[0].id == first_shift.id
+    assert services["payments"].history(employee.id, first.id)[0].id == payment.id
+    for require_assignment in (True, False):
+        with pytest.raises(DomainError, match="убран"):
+            services["attendance"].create_bulk(
+                **(
+                    args | {"work_date": date(2026, 1, 3), "require_assignment": require_assignment}
+                ),
+                object_id=first.id,
+                operation_key="removed",
+            )
+    # Debts can be settled after removal from the team.
+    services["payments"].create(
+        **payment_args, object_id=first.id, amount="1500", idempotency_key="settlement"
+    )
+    assert services["payroll"].summary(employee.id, object_id=first.id).balance == 0
+    team.set_active(member.id, True, actor=1001)
+    assert team.get(member.id).shift_rate == 2000
+    team.set_active(member.id, False, actor=1001)
+    returned = team.add(first.id, employee.id, shift_rate="2500", actor=1001)
+    assert returned.id == member.id
+    services["attendance"].create_bulk(
+        **(args | {"work_date": date(2026, 1, 3)}), object_id=first.id, operation_key="returned"
+    )
+    assert team.roster(first.id)[0][2] == 2
+    assert services["attendance"].get(first_shift.id).rate_snapshot == 2000
+    assert services["payroll"].summary(employee.id, object_id=first.id).balance == 2500
+    services["payments"].void(payment.id, actor=1001, reason="Ошибка")
+    assert services["payroll"].summary(employee.id, object_id=first.id).balance == 3000
+    assert services["payroll"].summary(employee.id, object_id=second.id).balance == -500
+    team.set_rate(member.id, None, actor=1001)
+    services["attendance"].create_bulk(
+        **(args | {"work_date": date(2026, 1, 4)}), object_id=first.id, operation_key="unrated"
+    )
+    assert services["payroll"].summary(employee.id, object_id=first.id).unrated_shifts == 1
+
+
 def test_full_object_workflow_and_creation_during_shift(tmp_path):
     url = f"sqlite:///{tmp_path / 'workflow.db'}"
     sessions = make_session_factory(url)
@@ -341,6 +423,76 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             assert session.get(WorkObject, first).status == "active"
             assert session.scalar(select(func.count()).select_from(Attendance)) == 3
             assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 3
+
+        def action(prefix):
+            return next(
+                button.callback_data
+                for row in bot.calls[-1].reply_markup.inline_keyboard
+                for button in row
+                if button.callback_data.startswith(prefix)
+            )
+
+        await click(f"member:{member.id}")
+        assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
+        await click(f"pay:{member.id}")
+        await send("NaN")
+        await send("3000")
+        await click("paydate:custom")
+        await send("01.01.2099")
+        assert "будущей" in bot.calls[-1].text
+        await send(datetime.now(UTC).strftime("%d.%m.%Y"))
+        await send("Аванс")
+        payment_confirm = action("payok:")
+        await click(payment_confirm)
+        assert "Аванс: 3000.00 RUB" in bot.calls[-1].text
+        await click(payment_confirm)  # repeating the confirmation cannot create a second payment
+        await click(f"pays:{member.id}:0")
+        payment_void = action("payvoid:")
+        assert len(bot.calls[-1].reply_markup.inline_keyboard) == 2
+        await click(f"membership:0:{member.id}")
+        remove_confirm = action("membershipok:")
+        assert team.get(member.id).active
+        await click(remove_confirm)
+        assert not team.get(member.id).active
+        assert "Аванс: 3000.00 RUB" in bot.calls[-1].text
+        assert employees.get(employee.id).status == "active"
+        await click(f"shift:{first}")
+        await click("shiftdate:today")
+        picker = next(call for call in reversed(bot.calls) if getattr(call, "reply_markup", None))
+        assert not any(
+            button.callback_data == f"toggle:{employee.id}"
+            for row in picker.reply_markup.inline_keyboard
+            for button in row
+        )
+        await click(f"membership:1:{member.id}")
+        restore_confirm = action("membershipok:")
+        await click(remove_confirm)  # an old confirmation cannot approve the new operation
+        assert not team.get(member.id).active
+        await click(restore_confirm)
+        assert team.get(member.id).active
+        assert team.get(member.id).shift_rate == 2500
+        other_member = team.roster(second)[0][0]
+        await click(f"pay:{other_member.id}")
+        await send("500")
+        await click("paydate:today")
+        await send("-")
+        other_confirm = action("payok:")
+        await click(payment_confirm)  # stale first-object approval cannot pay on the second object
+        await click(other_confirm)
+        assert "Осталось выплатить: 3000.00 RUB" in bot.calls[-1].text
+        await click(payment_void)
+        void_confirm = action("payvoidok:")
+        await click(void_confirm, user=9999)
+        await click(void_confirm)
+        assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
+        await click(f"member:{other_member.id}")
+        assert "Выплачено: 500.00 RUB" in bot.calls[-1].text
+        await click(f"member:{member.id}")
+        await click("teamcsv")
+        assert "Выплачено" in bot.calls[-1].document.data.decode("utf-8-sig")
+        await click(f"membership:0:{member.id}", user=9999)
+        await click(remove_confirm, user=9999)
+        assert team.get(member.id).active
         await bot.session.close()
         await configured_bot.session.close()
 

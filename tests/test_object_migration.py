@@ -88,6 +88,7 @@ def test_object_migration_preserves_history_and_backfills_memberships(tmp_path, 
     with engine.connect() as connection:
         rows = connection.execute(select(members).order_by(members.c.object_id)).mappings().all()
         assert len(rows) == 2
+        assert all(row["active"] for row in rows)
         assert rows[0]["shift_rate"] == 2000
         assert rows[1]["shift_rate"] is None
         assert (

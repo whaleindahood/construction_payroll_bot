@@ -120,6 +120,7 @@ class ObjectEmployee(Base):
     object_id: Mapped[str] = mapped_column(ForeignKey("objects.id"), index=True)
     employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id"), index=True)
     shift_rate: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -26,13 +26,43 @@ entered; the new counters count recorded visits, not fractional coefficients.
 Use **Состав и история смен → employee → История смен** to review dates and
 confirm cancellation of an erroneous entry. The count is derived from active
 attendance records; cancelled entries remain in the database and audit log.
-CSV/XLSX exports contain employee names and lifetime shift counts for the object.
+CSV/XLSX exports contain employee names, lifetime shift counts, membership status,
+earnings, payments and balances for the selected object, including former members.
 
 A shift rate belongs to an employee/object pair. Changing it applies to shifts
 recorded afterwards, including dates entered retrospectively; old snapshots are
-never recalculated. Rates can be omitted. The active interface displays no
-currency totals, salary balances or payment-entry dialogs. Legacy financial
-records and service code are retained; no historical payments are deleted.
+never recalculated. Rates can be omitted. If a historical shift has no rate,
+the employee's object card shows how many shifts lack a rate, sums only known
+earnings and does not present an incomplete balance as a final amount.
+
+## Payments and balances by object
+
+Open **Состав и история смен**, then select an employee. The card shows earnings,
+payments and the remaining debt for that employee on this object over all time.
+A negative balance is displayed as an advance. Balances are never offset across
+objects. Legacy payments without an object remain stored and are not allocated
+automatically to any object's balance.
+
+Use **Записать выплату / аванс**, enter the amount, choose the date, optionally
+enter a comment and confirm. This records an already made payment; it does not
+transfer money. Advances use the same flow. Repeating a confirmation cannot
+duplicate a payment. **История выплат** shows payments for this employee/object;
+select an erroneous entry and confirm cancellation to recalculate the balance.
+Cancelled records remain stored. Future payment dates are rejected.
+
+## Removing an employee from an object
+
+In the employee's object card, **Убрать из состава** asks for confirmation and
+removes the employee from new shift selection only on this object. The shared
+employee card, other objects, rate, shifts and payments remain intact. The former
+member is labelled in **Состав и история смен**; the balance is still visible,
+payments can still be recorded, and erroneous entries can still be cancelled.
+
+**Вернуть в состав** restores the same membership with its existing rate and
+history. Selecting the former member through **Добавить сотрудника → Выбрать из
+базы** also restores the existing membership, with the newly entered rate.
+Both the employee card and object must be active to restore membership. No
+membership periods or partial shifts are required.
 
 ## Editing and deleting cards
 
