@@ -5,11 +5,17 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 
 ## Active user flows
 
-- Owner: object → create/select employee → object team → date → select attendees
+- Owner: object → create/select employee → object team → select attendees for today
   → confirm → per-employee counters for this object.
 - Employee: single-use invitation → full name and payment details → confirmation.
-- Owner payments: employee on an object → amount → date → optional comment →
-  confirmation. Payment history supports confirmed cancellation of errors.
+- Owner payments: employee on an object → amount → confirmation. Date defaults
+  to today; date and comment editing are optional. Payment history supports
+  confirmed cancellation of errors.
+- Navigation: two bottom buttons (objects and shared employee database); object
+  cards expose shifts, employees, report and settings. Employee/object cards
+  expose payment, history and data/settings. Former members have a separate list.
+- Employee creation asks for full name, optional payment details and optional
+  object rate. Phone and Telegram ID are edited later through personal data.
 - Existing payroll dialogs in `app/bot/handlers.py` are no longer registered;
   their shared helpers and financial services remain for historical compatibility.
 

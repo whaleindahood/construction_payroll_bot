@@ -28,9 +28,7 @@ class ObjectForm(StatesGroup):
 
 class PersonForm(StatesGroup):
     name = State()
-    phone = State()
     details = State()
-    telegram = State()
     rate = State()
     confirm = State()
 
@@ -96,7 +94,9 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         if deleted:
             actions.append(("← Объекты", "objects"))
         else:
-            actions += [("➕ Добавить", "obj:create"), ("🗑 Удаленные объекты", "objects:deleted")]
+            actions.append(("➕ Новый объект", "obj:create"))
+            if any(obj.status == "archived" for obj in services.objects.list(active_only=False)):
+                actions.append(("Удалённые объекты", "objects:deleted"))
         await message.answer(
             "Удаленные объекты (можно восстановить):"
             if deleted
@@ -114,10 +114,9 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         if deleted:
             actions.append(("← Сотрудники", "employees"))
         else:
-            actions += [
-                ("➕ Добавить", "emp:create"),
-                ("🗑 Удаленные сотрудники", "employees:deleted"),
-            ]
+            actions.append(("➕ Новый сотрудник", "emp:create"))
+            if any(emp.status == "inactive" for emp in services.employees.list(active_only=False)):
+                actions.append(("Удалённые сотрудники", "employees:deleted"))
         await message.answer(
             "Удаленные сотрудники (можно восстановить):" if deleted else "База сотрудников:",
             reply_markup=buttons(*actions),
@@ -125,80 +124,60 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
 
     async def object_card(message, object_id):
         obj = services.objects.get(object_id)
-        rows = team.roster(object_id)
-        text = [
-            f"🏗 {obj.name}",
-            f"Адрес: {obj.address or '—'}",
-            f"Начало: {obj.start_date:%d.%m.%Y}",
-            f"Статус: { {'active': 'в работе', 'completed': 'завершен', 'archived': 'удален'}[obj.status] }",
-            f"Описание: {obj.description or '—'}",
-            f"Примечание: {obj.comment or '—'}",
-            "",
-            "Сотрудники и смены на этом объекте:",
-        ]
-        text.extend(
-            f"{employee.name} — {count} смен"
-            + (" (убран из состава)" if not member.active else "")
-            + (" (неактивен)" if employee.status != "active" else "")
-            for member, employee, count in rows
-        )
-        if not rows:
-            text.append("Сотрудников пока нет. Добавьте из базы или создайте карточку.")
+        rows = team.roster(object_id, active_only=True)
+        text = [f"🏗 {obj.name}"]
+        if obj.address:
+            text.append(obj.address)
+        text.append(f"Сотрудников: {len(rows)}")
         actions = []
         if obj.status == "active":
             actions += [
-                ("📅 Отметить смену", f"shift:{obj.id}"),
-                ("➕ Добавить сотрудника", "team:add"),
+                ("📅 Отметить смены", f"shift:{obj.id}"),
             ]
         else:
             text.append("Объект закрыт для новых смен.")
         actions += [
-            ("👷 Состав и история смен", "team:list"),
-            ("📊 Скачать смены и расчёты", "team:export"),
+            ("👷 Сотрудники объекта", f"teamopen:{obj.id}"),
+            ("📊 Отчёт", f"reportobj:{obj.id}"),
+            ("Настройки объекта", f"objsettings:{obj.id}"),
         ]
-        if obj.status == "archived":
-            actions.append(("♻️ Восстановить объект", f"restore:obj:{obj.id}"))
-        else:
-            actions += [
-                ("✏️ Изменить объект", "object:edit"),
-                ("🗑 Удалить объект", f"delete:obj:{obj.id}"),
-            ]
         actions.append(("← Объекты", "objects"))
         await answer_long(message, "\n".join(text), reply_markup=buttons(*actions))
 
-    async def employee_card(message, employee_id):
+    async def employee_card(message, employee_id, member_id=None):
         employee = services.employees.get(employee_id)
         lines = [
             f"👷 {employee.name}",
-            f"Телефон: {employee.phone or '—'}",
-            f"Telegram ID: {employee.telegram_id or 'не привязан'}",
             f"Реквизиты:\n{employee.payment_details or 'не заполнены'}",
-            f"Начало работы: {employee.start_date:%d.%m.%Y}",
-            f"Примечание: {employee.comment or '—'}",
-            f"Статус: {'активен' if employee.status == 'active' else 'удален'}",
-            "",
-            "Смены по объектам:",
         ]
+        if employee.phone:
+            lines.append(f"Телефон: {employee.phone}")
+        if employee.comment:
+            lines.append(employee.comment)
+        if employee.status != "active":
+            lines.append("Карточка удалена")
+        lines += ["", "Смены по объектам:"]
         lines.extend(
             f"{obj.name} — {count} смен" for obj, count in team.employee_objects(employee.id)
         )
         actions = (
             [
-                ("✏️ Изменить карточку", f"empedit:{employee.id}"),
-                ("🗑 Удалить сотрудника", f"delete:emp:{employee.id}"),
+                ("Изменить данные", f"empedit:{employee.id}"),
             ]
             if employee.status == "active"
             else [("♻️ Восстановить сотрудника", f"restore:emp:{employee.id}")]
         )
         if employee.telegram_id is None and employee.status == "active":
             actions.append(("🔗 Пригласить сотрудника", f"empinvite:{employee.id}"))
-        actions.append(("← Назад", "cancel"))
+        actions.append(("← Назад", f"member:{member_id}" if member_id else "employees"))
         await answer_long(message, "\n".join(lines), reply_markup=buttons(*actions))
 
     async def back(message, state):
         data = await state.get_data()
         await state.clear()
-        if data.get("object_id"):
+        if data.get("member_id"):
+            await show_member(message, state, data["member_id"])
+        elif data.get("object_id"):
             await state.update_data(object_id=data["object_id"])
             await object_card(message, data["object_id"])
         else:
@@ -216,9 +195,10 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     async def start(message: Message, state: FSMContext):
         await state.clear()
         await message.answer(
-            "Учет смен по объектам.\nОткройте «🏗 Объекты», выберите объект и отметьте вышедших сотрудников.",
+            "Смены и выплаты. Выберите объект.",
             reply_markup=kb.MAIN,
         )
+        await objects(message)
 
     @router.message(Command("cancel"))
     async def cancel_message(message: Message, state: FSMContext):
@@ -370,14 +350,23 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer()
         await object_card(callback.message, object_id)
 
+    @router.callback_query(F.data.regexp(r"^objsettings:[0-9a-f-]{36}$"))
     @router.callback_query(F.data == "object:edit")
     async def edit_object(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        if not data.get("object_id"):
-            raise DomainError("Сначала откройте объект.")
+        object_id = (
+            callback.data.split(":", 1)[1]
+            if callback.data.startswith("objsettings:")
+            else data.get("object_id", "")
+        )
+        obj = services.objects.get(object_id)
+        await state.clear()
+        await state.update_data(object_id=obj.id)
         await callback.answer()
-        await callback.message.answer(
-            "Что изменить?",
+        await answer_long(
+            callback.message,
+            f"Настройки: {obj.name}\nНачало работ: {obj.start_date:%d.%m.%Y}\n"
+            f"Описание: {obj.description or '—'}\nПримечание: {obj.comment or '—'}\n\nЧто изменить?",
             reply_markup=buttons(
                 ("Название", "objectfield:name"),
                 ("Адрес", "objectfield:address"),
@@ -385,7 +374,10 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
                 ("Описание", "objectfield:description"),
                 ("Примечание", "objectfield:comment"),
                 ("Завершить / возобновить работы", "object:status"),
-                ("← Назад", "cancel"),
+                ("Восстановить объект", f"restore:obj:{obj.id}")
+                if obj.status == "archived"
+                else ("Удалить объект", f"delete:obj:{obj.id}"),
+                ("← Объект", f"obj:{obj.id}"),
             ),
         )
 
@@ -432,26 +424,12 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer("Статус изменен")
         await back(callback.message, state)
 
-    @router.message(F.text == "👷 Сотрудники")
+    @router.message(F.text.in_({"👷 Сотрудники", "👷 База сотрудников"}))
     async def employee_menu(message: Message, state: FSMContext):
         await state.clear()
         await employees(message)
 
     @router.callback_query(F.data == "team:add")
-    async def add_menu(callback: CallbackQuery, state: FSMContext):
-        data = await state.get_data()
-        if not data.get("object_id"):
-            raise DomainError("Сначала откройте объект.")
-        await callback.answer()
-        await callback.message.answer(
-            "Добавить сотрудника на объект:",
-            reply_markup=buttons(
-                ("Выбрать из базы", "team:existing"),
-                ("Создать полную карточку", "emp:create"),
-                ("← Назад", "cancel"),
-            ),
-        )
-
     @router.callback_query(F.data == "team:existing")
     async def existing_people(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
@@ -460,17 +438,37 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer()
         available = team.available(data["object_id"])
         await callback.message.answer(
-            "Выберите сотрудника:"
+            "Добавить на объект. Выберите сотрудника из базы или создайте нового:"
             if available
-            else "Все сотрудники базы уже добавлены. Можно создать новую карточку.",
-            reply_markup=kb.entity_list(available, "attach", create_callback="emp:create"),
+            else "Нет сотрудников для добавления. Создайте нового:",
+            reply_markup=buttons(
+                *[(employee.name, f"attach:{employee.id}") for employee in available],
+                ("➕ Новый сотрудник", "emp:create"),
+                ("← Назад", "add:back"),
+            ),
         )
+
+    @router.callback_query(F.data == "add:back")
+    async def add_back(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        await callback.answer()
+        if data.get("work_date"):
+            await shift_picker(callback.message, state)
+        else:
+            await show_roster(callback.message, state, data.get("object_id", ""))
 
     async def rate_prompt(message, state):
         await state.set_state(PersonForm.rate)
         await message.answer(
-            "Стоимость смены этого сотрудника на этом объекте, в рублях.\nВведите сумму или «-», чтобы вести только счетчик смен:"
+            "Ставка за смену на этом объекте, в рублях:",
+            reply_markup=buttons(("Указать позже", "person:skiprate")),
         )
+
+    @router.callback_query(PersonForm.rate, F.data == "person:skiprate")
+    async def skip_person_rate(callback: CallbackQuery, state: FSMContext):
+        await state.update_data(shift_rate=None)
+        await callback.answer()
+        await person_preview(callback.message, state)
 
     @router.callback_query(F.data.startswith("attach:"))
     async def attach_person(callback: CallbackQuery, state: FSMContext):
@@ -497,31 +495,24 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     @router.message(PersonForm.name)
     async def person_name(message: Message, state: FSMContext):
         await state.update_data(person_name=clean_text(message.text, "ФИО", 200, required=True))
-        await state.set_state(PersonForm.phone)
-        await message.answer("Телефон сотрудника или «-», чтобы пропустить:")
-
-    @router.message(PersonForm.phone)
-    async def person_phone(message: Message, state: FSMContext):
-        await state.update_data(person_phone=optional(message.text, "Телефон", 50))
         await state.set_state(PersonForm.details)
         await message.answer(
-            "Реквизиты для выплаты (банк и телефон для СБП, номер карты или счет) либо «-», чтобы сотрудник заполнил их позже:"
+            "Реквизиты: банк и телефон для СБП, номер карты или счёт. Можно заполнить позже.",
+            reply_markup=buttons(("Заполнить позже", "person:skipdetails")),
         )
+
+    @router.callback_query(PersonForm.details, F.data == "person:skipdetails")
+    async def skip_person_details(callback: CallbackQuery, state: FSMContext):
+        await state.update_data(person_details=None)
+        await callback.answer()
+        await after_person_details(callback.message, state)
 
     @router.message(PersonForm.details)
     async def person_details(message: Message, state: FSMContext):
         await state.update_data(person_details=optional(message.text, "Реквизиты", 1000))
-        await state.set_state(PersonForm.telegram)
-        await message.answer(
-            "Числовой Telegram ID сотрудника либо «-», чтобы пригласить его по личной ссылке позже:"
-        )
+        await after_person_details(message, state)
 
-    @router.message(PersonForm.telegram)
-    async def person_telegram(message: Message, state: FSMContext):
-        raw = optional(message.text, "Telegram ID", 20)
-        if raw is not None and (not raw.isascii() or not raw.isdigit() or not 0 < int(raw) < 2**63):
-            raise DomainError("Введите положительный числовой Telegram ID или «-».")
-        await state.update_data(person_telegram=int(raw) if raw else None)
+    async def after_person_details(message, state):
         data = await state.get_data()
         if data.get("object_id"):
             await rate_prompt(message, state)
@@ -532,11 +523,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         data = await state.get_data()
         lines = ["Проверьте карточку:", data["person_name"]]
         if not data.get("existing_employee_id"):
-            lines += [
-                f"Телефон: {data.get('person_phone') or '—'}",
-                f"Реквизиты: {data.get('person_details') or 'не заполнены'}",
-                f"Telegram ID: {data.get('person_telegram') or 'по приглашению'}",
-            ]
+            lines.append(f"Реквизиты: {data.get('person_details') or 'заполнят позже'}")
         if data.get("object_id"):
             lines += [
                 f"Объект: {services.objects.get(data['object_id']).name}",
@@ -597,7 +584,12 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     async def open_employee(callback: CallbackQuery, state: FSMContext):
         await state.set_state(None)
         await callback.answer()
-        await employee_card(callback.message, callback.data.split(":", 1)[1])
+        employee_id = callback.data.split(":", 1)[1]
+        data = await state.get_data()
+        member_id = data.get("member_id")
+        if member_id and team.get(member_id).employee_id != employee_id:
+            member_id = None
+        await employee_card(callback.message, employee_id, member_id)
 
     @router.callback_query(F.data.startswith("empinvite:"))
     async def invite(callback: CallbackQuery):
@@ -625,7 +617,8 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
                 ("Telegram ID", "personfield:telegram_id"),
                 ("Дата начала работы", "personfield:start_date"),
                 ("Примечание", "personfield:comment"),
-                ("← Назад", "cancel"),
+                ("Удалить сотрудника из базы", f"delete:emp:{employee_id}"),
+                ("← Назад", f"emp:{employee_id}"),
             ),
         )
 
@@ -676,23 +669,43 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await employee_card(message, employee.id)
 
     @router.callback_query(F.data == "team:list")
+    @router.callback_query(F.data.regexp(r"^team(open|former):[0-9a-f-]{36}$"))
     async def roster(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
-        obj = services.objects.get(data.get("object_id", ""))
-        rows = team.roster(obj.id)
+        object_id = (
+            data.get("object_id", "")
+            if callback.data == "team:list"
+            else callback.data.split(":", 1)[1]
+        )
         await callback.answer()
-        await callback.message.answer(
-            f"Состав объекта «{obj.name}». Выберите сотрудника:",
-            reply_markup=buttons(
-                *[
-                    (
-                        f"{emp.name} — {count} смен" + (" · убран" if not member.active else ""),
-                        f"member:{member.id}",
-                    )
-                    for member, emp, count in rows
-                ],
-                ("← Объект", "cancel"),
-            ),
+        await show_roster(
+            callback.message, state, object_id, former=callback.data.startswith("teamformer:")
+        )
+
+    async def show_roster(message, state, object_id, *, former=False):
+        obj = services.objects.get(object_id)
+        all_rows = team.roster(obj.id)
+        rows = [
+            (member, emp, count)
+            for member, emp, count in all_rows
+            if (member.active and emp.status == "active") != former
+        ]
+        await state.clear()
+        await state.update_data(object_id=obj.id)
+        actions = [
+            (f"{emp.name} · {count} смен", f"member:{member.id}") for member, emp, count in rows
+        ]
+        if not former and obj.status == "active":
+            actions.append(("➕ Добавить сотрудника", "team:add"))
+        if former:
+            actions.append(("← Сотрудники объекта", f"teamopen:{obj.id}"))
+        elif len(rows) != len(all_rows):
+            actions.append(("Бывшие сотрудники", f"teamformer:{obj.id}"))
+        actions.append(("← Объект", f"obj:{obj.id}"))
+        await message.answer(
+            f"{'Бывшие сотрудники' if former else 'Сотрудники объекта'} · {obj.name}\n"
+            + ("Выберите сотрудника." if rows else "Список пуст."),
+            reply_markup=buttons(*actions),
         )
 
     @router.callback_query(F.data.regexp(r"^member:[0-9a-f-]{36}$"))
@@ -719,24 +732,44 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             )
         await message.answer(
             f"{employee.name}\nОбъект: {obj.name}\n"
-            f"Состав: {'работает на объекте' if member.active else 'убран из состава'}\n"
-            f"Смен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}\n\n"
+            + ("Убран из состава\n" if not member.active else "")
+            + f"Смен: {count}\nСтоимость смены: {member.shift_rate or 'не указана'}\n\n"
             f"За всё время на этом объекте:\n"
             f"Начислено{' по сменам со ставкой' if summary.unrated_shifts else ''}: {summary.earned} {summary.currency}\n"
             f"Выплачено: {summary.paid} {summary.currency}\n{balance}",
             reply_markup=buttons(
-                ("📋 Карточка сотрудника", f"emp:{employee.id}"),
-                ("📅 История смен", "member:history"),
-                ("Изменить стоимость смены", "member:rate"),
-                ("💵 Записать выплату / аванс", f"pay:{member.id}"),
-                ("История выплат", f"pays:{member.id}:0"),
-                (
-                    "Убрать из состава" if member.active else "Вернуть в состав",
-                    f"membership:{int(not member.active)}:{member.id}",
-                ),
-                ("← Объект", "cancel"),
+                ("💵 Записать выплату", f"pay:{member.id}"),
+                ("История", f"memberlog:{member.id}"),
+                ("Данные и настройки", f"membermore:{member.id}"),
+                ("← Сотрудники объекта", f"teamopen:{obj.id}"),
             ),
         )
+
+    @router.callback_query(F.data.regexp(r"^member(log|more):[0-9a-f-]{36}$"))
+    async def member_more(callback: CallbackQuery, state: FSMContext):
+        member = team.get(callback.data.split(":", 1)[1])
+        employee = services.employees.get(member.employee_id)
+        obj = services.objects.get(member.object_id)
+        await state.clear()
+        await state.update_data(object_id=obj.id, member_id=member.id)
+        if callback.data.startswith("memberlog:"):
+            text = f"История · {employee.name}\n{obj.name}"
+            actions = [("Смены", "member:history"), ("Выплаты", f"pays:{member.id}:0")]
+        else:
+            text = f"{employee.name}\n{obj.name}\n\nРеквизиты:\n{employee.payment_details or 'не заполнены'}"
+            actions = [
+                ("Ставка за смену", "member:rate"),
+                ("Личные данные", f"emp:{employee.id}"),
+                (
+                    "Убрать с объекта" if member.active else "Вернуть на объект",
+                    f"membership:{int(not member.active)}:{member.id}",
+                ),
+            ]
+            if employee.telegram_id is None and employee.status == "active":
+                actions.insert(2, ("Пригласить заполнить данные", f"empinvite:{employee.id}"))
+        actions.append(("← Назад", f"member:{member.id}"))
+        await callback.answer()
+        await callback.message.answer(text, reply_markup=buttons(*actions))
 
     @router.callback_query(F.data.regexp(r"^membership:[01]:[0-9a-f-]{36}$"))
     async def membership_preview(callback: CallbackQuery, state: FSMContext):
@@ -775,7 +808,9 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         employee = services.employees.get(member.employee_id)
         obj = services.objects.get(member.object_id)
         await state.clear()
-        await state.update_data(object_id=obj.id, member_id=member.id)
+        await state.update_data(
+            object_id=obj.id, member_id=member.id, payment_date=today().isoformat(), comment=None
+        )
         await state.set_state(ObjectPaymentForm.amount)
         await callback.answer()
         await callback.message.answer(
@@ -786,15 +821,25 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
     @router.message(ObjectPaymentForm.amount)
     async def payment_amount(message: Message, state: FSMContext):
         await state.update_data(amount=str(money(message.text)))
+        await show_payment_preview(message, state)
+
+    @router.callback_query(ObjectPaymentForm.confirm, F.data == "payment:date")
+    async def payment_change_date(callback: CallbackQuery, state: FSMContext):
         await state.set_state(ObjectPaymentForm.date)
-        await message.answer("Дата выплаты:", reply_markup=kb.dates("paydate"))
+        await callback.answer()
+        await callback.message.answer("Дата выплаты:", reply_markup=kb.dates("paydate"))
+
+    @router.callback_query(ObjectPaymentForm.confirm, F.data == "payment:comment")
+    async def payment_change_comment(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(ObjectPaymentForm.comment)
+        await callback.answer()
+        await callback.message.answer("Комментарий к выплате или авансу. «-» — убрать комментарий:")
 
     async def payment_date_selected(message, state, payment_date):
         if payment_date > today():
             raise DomainError("Нельзя записать выплату будущей датой.")
         await state.update_data(payment_date=payment_date.isoformat())
-        await state.set_state(ObjectPaymentForm.comment)
-        await message.answer("Комментарий к выплате или авансу, либо «-», чтобы пропустить:")
+        await show_payment_preview(message, state)
 
     @router.callback_query(ObjectPaymentForm.date, F.data.startswith("paydate:"))
     async def payment_date(callback: CallbackQuery, state: FSMContext):
@@ -816,13 +861,17 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
 
     @router.message(ObjectPaymentForm.comment)
     async def payment_preview(message: Message, state: FSMContext):
-        comment = optional(message.text, "Комментарий", 1000)
+        await state.update_data(comment=optional(message.text, "Комментарий", 1000))
+        await show_payment_preview(message, state)
+
+    async def show_payment_preview(message, state):
         data = await state.get_data()
+        comment = data.get("comment")
         member = team.get(data["member_id"])
         employee = services.employees.get(member.employee_id)
         obj = services.objects.get(member.object_id)
         token = str(uuid.uuid4())
-        await state.update_data(comment=comment, token=token)
+        await state.update_data(token=token)
         await state.set_state(ObjectPaymentForm.confirm)
         await message.answer(
             f"Записать выплату?\n{employee.name}\nОбъект: {obj.name}\n"
@@ -830,7 +879,10 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             f"Дата: {date.fromisoformat(data['payment_date']):%d.%m.%Y}\n"
             f"Комментарий: {comment or '—'}",
             reply_markup=buttons(
-                ("Записать выплату", f"payok:{token}"), ("Отмена", f"member:{member.id}")
+                ("Записать выплату", f"payok:{token}"),
+                ("Изменить дату", "payment:date"),
+                ("Комментарий", "payment:comment"),
+                ("Отмена", f"member:{member.id}"),
             ),
         )
 
@@ -938,7 +990,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         team.set_rate(
             data["member_id"], optional(message.text, "Стоимость", 30), actor=message.from_user.id
         )
-        await back(message, state)
+        await show_member(message, state, data["member_id"])
 
     @router.callback_query(F.data.regexp(r"^shift:[0-9a-f-]{36}$"))
     async def shift_start(callback: CallbackQuery, state: FSMContext):
@@ -946,11 +998,16 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         if obj.status != "active":
             raise DomainError("Объект закрыт для новых смен.")
         await state.clear()
-        await state.update_data(object_id=obj.id, employee_ids=[])
+        await state.update_data(object_id=obj.id, employee_ids=[], work_date=today().isoformat())
+        await callback.answer()
+        await shift_picker(callback.message, state)
+
+    @router.callback_query(ShiftForm.people, F.data == "shift:date")
+    async def change_shift_date(callback: CallbackQuery, state: FSMContext):
         await state.set_state(ShiftForm.date)
         await callback.answer()
         await callback.message.answer(
-            f"{obj.name}\nЗа какой день отметить смену?", reply_markup=kb.dates("shiftdate")
+            "За какой день отметить смены?", reply_markup=kb.dates("shiftdate")
         )
 
     async def shift_picker(message, state):
@@ -978,6 +1035,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             )
         actions += [
             ("✅ Сохранить выбранных", "shift:preview"),
+            ("Изменить дату", "shift:date"),
             ("➕ Добавить сотрудника", "team:add"),
             ("← Объект", "cancel"),
         ]
@@ -995,14 +1053,15 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             await callback.message.answer("Введите дату ДД.ММ.ГГГГ:")
         else:
             await state.update_data(
-                work_date=(today() - timedelta(days=choice == "yesterday")).isoformat()
+                work_date=(today() - timedelta(days=choice == "yesterday")).isoformat(),
+                employee_ids=[],
             )
             await shift_picker(callback.message, state)
         await callback.answer()
 
     @router.message(ShiftForm.custom_date)
     async def shift_custom_date(message: Message, state: FSMContext):
-        await state.update_data(work_date=parse_date(message.text).isoformat())
+        await state.update_data(work_date=parse_date(message.text).isoformat(), employee_ids=[])
         await shift_picker(message, state)
 
     @router.callback_query(ShiftForm.people, F.data.startswith("toggle:"))
@@ -1104,7 +1163,7 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
             reply_markup=buttons(
                 *[(f"{row.work_date:%d.%m.%Y}", f"undo:{row.id}") for row in rows],
                 ("Следующие 20", "history:next"),
-                ("← Объект", "cancel"),
+                ("← История", f"memberlog:{member.id}"),
             ),
         )
 
@@ -1137,12 +1196,25 @@ def build_router(services: Services, *, timezone_name: str, default_currency: st
         await callback.answer("Смена отменена")
         await back(callback.message, state)
 
+    @router.callback_query(F.data.regexp(r"^reportobj:[0-9a-f-]{36}$"))
     @router.callback_query(F.data == "team:export")
-    async def export_menu(callback: CallbackQuery):
+    async def export_menu(callback: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        obj = services.objects.get(
+            callback.data.split(":", 1)[1]
+            if callback.data.startswith("reportobj:")
+            else data.get("object_id", "")
+        )
+        await state.clear()
+        await state.update_data(object_id=obj.id)
         await callback.answer()
         await callback.message.answer(
-            "Смены, начисления и выплаты по сотрудникам за всё время на выбранном объекте:",
-            reply_markup=buttons(("CSV", "teamcsv"), ("XLSX", "teamxlsx")),
+            f"Отчёт · {obj.name}\nСмены, начисления, выплаты и остатки за всё время.",
+            reply_markup=buttons(
+                ("Скачать Excel", "teamxlsx"),
+                ("Скачать CSV", "teamcsv"),
+                ("← Объект", f"obj:{obj.id}"),
+            ),
         )
 
     @router.callback_query(F.data.in_({"teamcsv", "teamxlsx"}))

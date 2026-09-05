@@ -10,8 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 MAIN = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🏗 Объекты"), KeyboardButton(text="👷 Сотрудники")],
-        [KeyboardButton(text="📊 Смены")],
+        [KeyboardButton(text="🏗 Объекты"), KeyboardButton(text="👷 База сотрудников")],
     ],
     resize_keyboard=True,
 )
