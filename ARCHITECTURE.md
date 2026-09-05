@@ -5,15 +5,15 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 
 ## Active user flows
 
-- Owner: object → create/select employee → object team → select attendees for today
-  → confirm → per-employee counters for this object.
+- Owner: object → visible team → select attendees for today → confirm →
+  per-employee counters for this object.
 - Employee: single-use invitation → full name and payment details → confirmation.
 - Owner payments: employee on an object → amount → confirmation. Date defaults
   to today; date and comment editing are optional. Payment history supports
   confirmed cancellation of errors.
 - Navigation: two bottom buttons (objects and shared employee database); object
-  cards expose shifts, employees, report and settings. Employee/object cards
-  expose payment, history and data/settings. Former members have a separate list.
+  cards show the roster and expose shifts, bulk attachment, payments, calculation
+  and settings. Employee/object cards expose the common actions directly.
 - Employee creation asks for full name, optional payment details and optional
   object rate. Phone and Telegram ID are edited later through personal data.
 - The old payroll router, its keyboards and global report helpers have been
@@ -44,8 +44,9 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 3. Counters count active rows, never mutable stored totals; legacy fractional
    rows each count as one visit. New UI records a full shift (coefficient 1).
 4. Confirmation is required for card creation, shifts and shift cancellation.
-5. Per-object rates are optional. Missing rates produce NULL snapshots, not an
-   invented zero or placeholder salary. Updating a rate never changes old rows.
+5. Per-object rates override the applicable base employee rate. If both are
+   missing, attendance receives a NULL snapshot rather than an invented zero.
+   Updating a rate never changes old rows.
    An explicit, confirmed action may fill an unrated shift. A conditional UPDATE
    rejects already priced or cancelled rows and records the change in the audit.
 6. Cancellation retains the original row and writes an audit record.

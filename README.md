@@ -7,8 +7,10 @@ Telegram bot for tracking employee shifts separately on each construction object
 1. `/start` opens the objects list. The bottom menu contains **Объекты** and
    **База сотрудников**. Select an object or create one with a name, address
    and start date.
-2. Open **Сотрудники объекта → Добавить сотрудника**: select an employee from
-   the shared database or create a card with full name and payment details.
+2. The object card immediately shows its active workers, effective rates and
+   lifetime shift counts. Use **Добавить рабочих** to check several people from
+   the shared database and attach them in one operation, or create a new card
+   with full name and payment details. The new card is attached immediately.
    **Заполнить позже** skips the payment details. Phone and Telegram ID remain
    available under personal data editing, rather than in the creation dialog.
 3. Set an optional shift rate in rubles for that employee on that object.
@@ -18,8 +20,9 @@ Telegram bot for tracking employee shifts separately on each construction object
    you choose another day and clears unsaved selections from the previous date.
    Only active employees assigned to that object appear.
    A new employee can be added during this flow; earlier selections are kept.
-5. **Сотрудники объекта** displays each employee's shift count, including zero shifts.
-   The shared employee card displays separate counts for each object.
+5. Select a worker directly on the object card to add one shift, record a
+   payment, change the object rate or open history. The shared employee card
+   remains a secondary directory and displays separate counts for each object.
 
 One recorded date is one visit/shift on that object. A repeated confirmation or
 another attempt to record the same employee/object/date cannot add a duplicate.
@@ -27,19 +30,20 @@ The same person can attend different objects on the same day. Future shifts are
 not allowed. Historical fractional attendance remains stored as originally
 entered; the new counters count recorded visits, not fractional coefficients.
 
-Use **Сотрудники объекта → employee → История → Смены** to review dates and
+Use **object → employee → История → Смены** to review dates and
 confirm cancellation of an erroneous entry. The count is derived from active
 attendance records; cancelled entries remain in the database and audit log.
 CSV/XLSX exports contain employee names, lifetime shift counts, membership status,
 earnings, payments and balances for the selected object, including former members.
 
-A shift rate belongs to an employee/object pair. Changing it applies to shifts
+A shift rate belongs to an employee/object pair. If it is omitted, the latest
+applicable base employee rate is used. Changing the object rate applies to shifts
 recorded afterwards, including dates entered retrospectively; old snapshots are
-never recalculated. Rates can be omitted. If a historical shift has no rate,
+never recalculated. Both rates can be omitted. If a historical shift has no rate,
 the employee's object card shows how many shifts lack a rate, sums only known
 earnings and does not present an incomplete balance as a final amount.
 
-Use **Данные и настройки → Смены без ставки** to select a date, enter its rate
+Use **Смены без ставки** on the employee's object card to select a date, enter its rate
 and confirm the missing accrual. This fills only that previously unrated shift;
 it cannot overwrite an existing calculation or price a cancelled record. The
 current rate on the object is unchanged. Calculated shifts leave this task list
@@ -48,7 +52,7 @@ never remove shifts from history or reduce the number of worked shifts.
 
 ## Payments and balances by object
 
-Open **Сотрудники объекта**, then select an employee. The card shows earnings,
+Select an employee on the object card. The card shows earnings,
 payments and the remaining debt for that employee on this object over all time.
 A negative balance is displayed as an advance. Balances are never offset across
 objects. Legacy payments without an object remain stored and are not allocated
@@ -64,15 +68,14 @@ Cancelled records remain stored. Future payment dates are rejected.
 
 ## Removing an employee from an object
 
-In the employee's object card, **Данные и настройки → Убрать с объекта** asks for confirmation and
+In the employee's object card, **Убрать с объекта** asks for confirmation and
 removes the employee from new shift selection only on this object. The shared
 employee card, other objects, rate, shifts and payments remain intact. The former
-member is available under **Сотрудники объекта → Бывшие сотрудники**; the balance is still visible,
+member is available under **Бывшие сотрудники**; the balance is still visible,
 payments can still be recorded, and erroneous entries can still be cancelled.
 
-**Данные и настройки → Вернуть на объект** restores the same membership with its
-existing rate and history. Selecting the former member through **Добавить
-сотрудника** also restores the existing membership, with the newly entered rate.
+**Вернуть на объект** restores the same membership with its existing rate and
+history. Selecting the former member through **Добавить рабочих** does the same.
 Both the employee card and object must be active to restore membership. No
 membership periods or partial shifts are required.
 

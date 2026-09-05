@@ -91,6 +91,52 @@ def test_roster_required_and_rate_optional(services):
     assert team.available(obj.id) == []
 
 
+def test_mass_attach_and_effective_object_rate_keep_attendance_snapshots(services):
+    team = TeamService(services["sessions"])
+    obj = services["objects"].create(name="Дом", start_date=date(2026, 1, 1), actor=1001)
+    first = services["employees"].create(
+        name="Иван",
+        rate="2000",
+        currency="RUB",
+        start_date=date(2026, 1, 1),
+        actor=1001,
+    )
+    second = services["employees"].create(
+        name="Руслан", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+    )
+    assert {row.id for row in team.available(obj.id)} == {first.id, second.id}
+    members = team.add_many(obj.id, [first.id, second.id], actor=1001)
+    assert len(members) == 2
+    assert team.effective_rate(members[0].id, date(2026, 1, 2)) == Decimal(2000)
+    assert team.effective_rate(members[1].id, date(2026, 1, 2)) is None
+    assert team.available(obj.id) == []
+    with pytest.raises(Conflict):
+        team.add_many(obj.id, [first.id], actor=1001)
+
+    old = services["attendance"].create_bulk(
+        employee_ids=[first.id],
+        object_id=obj.id,
+        work_date=date(2026, 1, 2),
+        coefficient="1",
+        actor=1001,
+        operation_key="base-rate",
+        require_assignment=True,
+    )[0]
+    team.set_rate(members[0].id, "2500", actor=1001)
+    new = services["attendance"].create_bulk(
+        employee_ids=[first.id],
+        object_id=obj.id,
+        work_date=date(2026, 1, 3),
+        coefficient="1",
+        actor=1001,
+        operation_key="object-rate",
+        require_assignment=True,
+    )[0]
+    assert old.rate_snapshot == Decimal(2000)
+    assert new.rate_snapshot == Decimal(2500)
+    assert services["payroll"].summary(first.id, object_id=obj.id).earned == Decimal(4500)
+
+
 def test_membership_removal_preserves_separate_balances_and_history(services):
     team = TeamService(services["sessions"])
     employee = services["employees"].create(
@@ -258,9 +304,13 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         object_screen = next(
             call for call in reversed(bot.calls) if getattr(call, "reply_markup", None)
         )
-        assert len(object_screen.reply_markup.inline_keyboard) == 5
-        await click(f"teamopen:{first}")
-        await click(action("teamadd:"))
+        assert "Рабочие на объекте: 0" in object_screen.text
+        assert any(
+            button.callback_data == f"teamadd:{first}"
+            for row in object_screen.reply_markup.inline_keyboard
+            for button in row
+        )
+        await click(f"teamadd:{first}")
         await click("emp:create")
         await send("Иванов Иван Иванович")
         await send("Тестовый банк, СБП +79990000000")
@@ -275,11 +325,20 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             assert employee.payment_details.startswith("Тестовый банк")
         assert team.roster(first)[0][2] == 0
         second = await create_object("Второй объект")
-        await click(f"teamopen:{second}")
-        await click(action("teamadd:"))
-        await click(action(f"attach:{employee.id}:"))
+        await click(f"teamadd:{second}")
+        await click(action(f"addtoggle:{employee.id}:"))
+        assert "Добавить выбранных: 1" in next(
+            button.text
+            for row in bot.calls[-1].reply_markup.inline_keyboard
+            for button in row
+            if button.callback_data.startswith("addsave:")
+        )
+        mass_add_save = action("addsave:")
+        await click(mass_add_save)
+        await click(mass_add_save)
+        second_member = team.roster(second)[0][0]
+        await click(f"memberrate:{second_member.id}")
         await send("3500")
-        await click(action("personsave:"))
         with sessions() as session:
             assert session.scalar(select(func.count()).select_from(Employee)) == 1
             assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 2
@@ -340,10 +399,16 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         )
 
         await click(f"obj:{first}")
-        await click(f"teamopen:{first}")
+        assert "Иванов Иван Иванович — 2 000 RUB/смена • 1 смен" in bot.calls[-1].text
+        assert "Петров Пётр Петрович — не указана RUB/смена • 1 смен" in bot.calls[-1].text
         member = next(member for member, emp, _ in team.roster(first) if emp.id == employee.id)
         await click(f"member:{member.id}")
-        assert len(bot.calls[-1].reply_markup.inline_keyboard) == 4
+        assert "Ставка: 2 000 RUB/смена" in bot.calls[-1].text
+        assert any(
+            button.callback_data == f"quickshift:{member.id}"
+            for row in bot.calls[-1].reply_markup.inline_keyboard
+            for button in row
+        )
         await click(f"memberlog:{member.id}")
         await click(f"shifts:{member.id}:0")
         assert "История смен" in bot.calls[-1].text
@@ -354,6 +419,9 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert attendance.get(row.id).voided_at is not None
         assert next(count for _, emp, count in team.roster(first) if emp.id == employee.id) == 0
         assert team.roster(second)[0][2] == 1
+        await click(f"quickshift:{member.id}")
+        assert "Иванов Иван Иванович — +1 смена" in bot.calls[-1].text
+        await click("cancel")
         await click(f"teamcsv:{first}")
         assert b"\xd0\xa1\xd0\xbc\xd0\xb5\xd0\xbd\xd1\x8b" in bot.calls[-1].document.data
 

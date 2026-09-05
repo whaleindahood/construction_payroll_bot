@@ -196,7 +196,7 @@ def test_old_buttons_never_target_current_unrelated_card(services):
         await click(f"pay:{a.id}")
         await send("1500")
         await click(action("payok:"))
-        assert "Всего отработано смен: 1" in bot.calls[-1].text
+        assert "Смен: 1" in bot.calls[-1].text
         assert "Осталось выплатить: 0.00 RUB" in bot.calls[-1].text
         await click(f"shifts:{a.id}:0")
         assert action("undo:") == f"undo:{row_a.id}"

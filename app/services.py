@@ -629,7 +629,22 @@ class AttendanceService:
             employee = session.get(Employee, employee_id)
             if work_date < employee.start_date:
                 raise DomainError("Смена не может быть раньше начала работы сотрудника.")
-            return member.shift_rate, employee.currency
+            if member.shift_rate is not None:
+                return member.shift_rate, employee.currency
+            base_rate = session.scalar(
+                select(EmployeeRate)
+                .where(
+                    EmployeeRate.employee_id == employee_id,
+                    EmployeeRate.valid_from <= work_date,
+                )
+                .order_by(EmployeeRate.valid_from.desc())
+                .limit(1)
+            )
+            return (
+                (base_rate.daily_rate, base_rate.currency)
+                if base_rate is not None
+                else (None, employee.currency)
+            )
         if require_assignment:
             raise DomainError("Сначала добавьте сотрудника в состав объекта.")
         # Legacy payroll API: retained for historical integrations without object rosters.

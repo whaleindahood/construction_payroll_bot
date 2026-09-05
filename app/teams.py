@@ -5,8 +5,8 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.models import Attendance, Employee, ObjectEmployee, WorkObject
-from app.services import Conflict, NotFound, audit, money
+from app.models import Attendance, Employee, EmployeeRate, ObjectEmployee, WorkObject
+from app.services import Conflict, DomainError, NotFound, audit, money
 
 
 class TeamService:
@@ -49,6 +49,58 @@ class TeamService:
             return row
         except IntegrityError as exc:
             raise Conflict("Сотрудник уже добавлен на этот объект.") from exc
+
+    def add_many(self, object_id: str, employee_ids, *, actor: int):
+        ids = list(dict.fromkeys(employee_ids))
+        if not ids:
+            raise DomainError("Выберите хотя бы одного сотрудника.")
+        try:
+            with self.sessions() as session, session.begin():
+                obj = session.get(WorkObject, object_id)
+                if obj is None or obj.status != "active":
+                    raise NotFound("Активный объект не найден.")
+                employees = {
+                    row.id: row
+                    for row in session.scalars(
+                        select(Employee).where(
+                            Employee.id.in_(ids), Employee.status == "active"
+                        )
+                    )
+                }
+                if set(employees) != set(ids):
+                    raise NotFound("Один из сотрудников не найден или удалён.")
+                existing = {
+                    row.employee_id: row
+                    for row in session.scalars(
+                        select(ObjectEmployee).where(
+                            ObjectEmployee.object_id == object_id,
+                            ObjectEmployee.employee_id.in_(ids),
+                        )
+                    )
+                }
+                if any(row.active for row in existing.values()):
+                    raise Conflict("Один из сотрудников уже добавлен на этот объект.")
+                rows = []
+                for employee_id in ids:
+                    row = existing.get(employee_id)
+                    restored = row is not None
+                    if row is None:
+                        row = ObjectEmployee(object_id=object_id, employee_id=employee_id)
+                        session.add(row)
+                    row.active = True
+                    session.flush()
+                    audit(
+                        session,
+                        actor,
+                        "employee_returned_to_object" if restored else "employee_added_to_object",
+                        "object_employee",
+                        row.id,
+                        after={"object_id": object_id, "employee_id": employee_id},
+                    )
+                    rows.append(row)
+                return rows
+        except IntegrityError as exc:
+            raise Conflict("Один из сотрудников уже добавлен на этот объект.") from exc
 
     def get(self, member_id: str):
         with self.sessions() as session:
@@ -109,6 +161,23 @@ class TeamService:
                     .where(Employee.status == "active", Employee.id.not_in(assigned))
                     .order_by(Employee.name)
                 )
+            )
+
+    def effective_rate(self, member_id: str, on_date: date):
+        with self.sessions() as session:
+            member = session.get(ObjectEmployee, member_id)
+            if member is None:
+                raise NotFound("Сотрудник не найден в составе объекта.")
+            if member.shift_rate is not None:
+                return member.shift_rate
+            return session.scalar(
+                select(EmployeeRate.daily_rate)
+                .where(
+                    EmployeeRate.employee_id == member.employee_id,
+                    EmployeeRate.valid_from <= on_date,
+                )
+                .order_by(EmployeeRate.valid_from.desc())
+                .limit(1)
             )
 
     def roster(self, object_id: str, *, active_only=False):
