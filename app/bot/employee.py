@@ -17,6 +17,18 @@ class EmployeeProfile(StatesGroup):
     confirm = State()
 
 
+def actor_id(message: Message) -> int:
+    if message.from_user is None:
+        raise DomainError("Не удалось определить пользователя.")
+    return message.from_user.id
+
+
+def callback_message(callback: CallbackQuery) -> Message:
+    if not isinstance(callback.message, Message):
+        raise DomainError("Сообщение с кнопкой недоступно. Откройте /start.")
+    return callback.message
+
+
 def build_employee_router(employees: EmployeeService) -> Router:
     router = Router(name="employee_profile")
     router.message.filter(MagicData(~F.is_owner))
@@ -54,14 +66,14 @@ def build_employee_router(employees: EmployeeService) -> Router:
                 return
             try:
                 employees.accept_invite(
-                    command.args.removeprefix("employee_"), telegram_id=message.from_user.id
+                    command.args.removeprefix("employee_"), telegram_id=actor_id(message)
                 )
             except DomainError as exc:
                 await message.answer(str(exc))
                 return
             await begin_profile(message, state)
             return
-        await show_profile(message, message.from_user.id)
+        await show_profile(message, actor_id(message))
 
     @router.callback_query(F.data == "profile:edit")
     async def edit(callback: CallbackQuery, state: FSMContext):
@@ -70,7 +82,7 @@ def build_employee_router(employees: EmployeeService) -> Router:
             await callback.answer("Нет доступа к карточке.", show_alert=True)
             return
         await callback.answer()
-        await begin_profile(callback.message, state)
+        await begin_profile(callback_message(callback), state)
 
     @router.message(EmployeeProfile.name)
     async def name(message: Message, state: FSMContext):
@@ -122,14 +134,15 @@ def build_employee_router(employees: EmployeeService) -> Router:
             return
         await state.clear()
         await callback.answer("Сохранено")
-        await callback.message.answer("Данные сохранены и доступны владельцу.")
-        await show_profile(callback.message, callback.from_user.id)
+        message = callback_message(callback)
+        await message.answer("Данные сохранены и доступны владельцу.")
+        await show_profile(message, callback.from_user.id)
 
     @router.callback_query(F.data == "profile:cancel")
     async def cancel(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await callback.answer("Отменено")
-        await show_profile(callback.message, callback.from_user.id)
+        await show_profile(callback_message(callback), callback.from_user.id)
 
     @router.callback_query()
     async def unavailable_callback(callback: CallbackQuery):

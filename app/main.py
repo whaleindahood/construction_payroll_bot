@@ -8,6 +8,7 @@ from typing import Any
 from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import CallbackQuery, Message, Update
+from aiogram.types.base import TelegramObject
 
 from app.bot.common import Services
 from app.bot.employee import build_employee_router
@@ -44,10 +45,12 @@ class AccessMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[Update, dict[str, Any]], Awaitable[Any]],
-        event: Update,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if not isinstance(event, Update):
+            return await handler(event, data)
         user = update_user(event)
         candidate = event.message or (event.callback_query and event.callback_query.message)
         if user is None or candidate is None or candidate.chat.type != "private":
@@ -67,10 +70,12 @@ class UpdateDedupMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[Update, dict[str, Any]], Awaitable[Any]],
-        event: Update,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if not isinstance(event, Update):
+            return await handler(event, data)
         if not self.dedup.claim(event.update_id):
             return None
         result = await handler(event, data)
@@ -110,7 +115,7 @@ def compose(settings: Settings) -> tuple[Bot, Dispatcher]:
 
 
 async def run() -> None:
-    settings = Settings()
+    settings = Settings()  # pyright: ignore[reportCallIssue] - values come from the environment
     bot, dispatcher = compose(settings)
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

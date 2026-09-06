@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -168,8 +169,8 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(50), index=True)
     entity_type: Mapped[str] = mapped_column(String(50), index=True)
     entity_id: Mapped[str] = mapped_column(String(36), index=True)
-    before: Mapped[dict | None] = mapped_column(JSON)
-    after: Mapped[dict | None] = mapped_column(JSON)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

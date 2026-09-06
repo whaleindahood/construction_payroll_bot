@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, Literal, overload
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -52,6 +53,22 @@ def money(value: str | Decimal | int) -> Decimal:
     return result
 
 
+@overload
+def clean_text(
+    value: str | None, field: str, max_length: int, *, required: Literal[True]
+) -> str: ...
+
+
+@overload
+def clean_text(
+    value: str | None,
+    field: str,
+    max_length: int,
+    *,
+    required: Literal[False] = False,
+) -> str | None: ...
+
+
 def clean_text(
     value: str | None, field: str, max_length: int, *, required: bool = False
 ) -> str | None:
@@ -74,8 +91,8 @@ def audit(
     entity_type: str,
     entity_id: str,
     *,
-    before: dict | None = None,
-    after: dict | None = None,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
 ) -> None:
     session.add(
         AuditLog(
@@ -502,6 +519,8 @@ class AttendanceService:
                     "Сотрудник убран из состава объекта. Сначала верните его в состав."
                 )
             employee = session.get(Employee, employee_id)
+            if employee is None:
+                raise NotFound("Сотрудник не найден.")
             if work_date < employee.start_date:
                 raise DomainError("Смена не может быть раньше начала работы сотрудника.")
             return member.shift_rate
@@ -899,7 +918,7 @@ class UpdateDedupService:
                     claimed_at = claimed_at.replace(tzinfo=UTC)
                 if row.status == "done" or now - claimed_at < self.STALE_AFTER:
                     return False
-                claimed = session.execute(
+                claimed_id = session.scalar(
                     update(TelegramUpdate)
                     .where(
                         TelegramUpdate.update_id == update_id,
@@ -907,8 +926,9 @@ class UpdateDedupService:
                         TelegramUpdate.claimed_at == row.claimed_at,
                     )
                     .values(status="processing", claimed_at=now)
+                    .returning(TelegramUpdate.update_id)
                 )
-                return claimed.rowcount == 1
+                return claimed_id == update_id
         except IntegrityError:
             return False
 

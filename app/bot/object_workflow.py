@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime, timedelta
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, ExceptionTypeFilter, MagicData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, Message
+from aiogram.types import BufferedInputFile, ErrorEvent, Message, User
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -17,6 +18,31 @@ from app.bot.common import Services, answer_long, parse_date
 from app.reports import table_csv, table_xlsx
 from app.services import DomainError, clean_text, money
 from app.teams import TeamService
+
+
+class CallbackQuery(Protocol):
+    """Fields guaranteed by buttons created and handled by this bot."""
+
+    data: str
+    message: Message
+    from_user: User
+    bot: Bot
+
+    async def answer(
+        self, text: str | None = None, *, show_alert: bool | None = None
+    ) -> bool: ...
+
+
+def message_text(message: Message) -> str:
+    if message.text is None:
+        raise DomainError("Отправьте значение текстом.")
+    return message.text
+
+
+def actor_id(message: Message) -> int:
+    if message.from_user is None:
+        raise DomainError("Не удалось определить пользователя.")
+    return message.from_user.id
 
 
 class ObjectForm(StatesGroup):
@@ -378,7 +404,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
 
     @router.message(ObjectForm.custom_date)
     async def object_custom_date(message: Message, state: FSMContext):
-        await save_object(message, state, parse_date(message.text), message.from_user.id)
+        await save_object(message, state, parse_date(message_text(message)), actor_id(message))
 
     @router.callback_query(F.data.startswith("obj:"))
     async def open_object(callback: CallbackQuery, state: FSMContext):
@@ -437,20 +463,34 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     async def object_edit_value(message: Message, state: FSMContext):
         data = await state.get_data()
         obj = services.objects.get(data["object_id"])
-        values = {
-            "name": obj.name,
-            "address": obj.address,
-            "description": obj.description,
-            "comment": obj.comment,
-        }
-        if data["edit_field"] not in {"name", "address", "start_date", "description", "comment"}:
+        field = data["edit_field"]
+        if field not in {"name", "address", "start_date", "description", "comment"}:
             raise DomainError("Неизвестное поле.")
-        values[data["edit_field"]] = (
-            parse_date(message.text)
-            if data["edit_field"] == "start_date"
-            else optional(message.text, "Значение", 4000)
+        name = obj.name
+        address = obj.address
+        description = obj.description
+        comment = obj.comment
+        start_date = None
+        value = message_text(message)
+        if field == "start_date":
+            start_date = parse_date(value)
+        elif field == "name":
+            name = clean_text(value, "Название объекта", 200, required=True)
+        elif field == "address":
+            address = optional(value, "Адрес", 1000)
+        elif field == "description":
+            description = optional(value, "Описание", 4000)
+        else:
+            comment = optional(value, "Примечание", 4000)
+        services.objects.update(
+            obj.id,
+            name=name,
+            address=address,
+            description=description,
+            comment=comment,
+            start_date=start_date,
+            actor=actor_id(message),
         )
-        services.objects.update(obj.id, **values, actor=message.from_user.id)
         await back(message, state)
 
     @router.callback_query(F.data.regexp(r"^objectstatus:[0-9a-f-]{36}:(active|completed)$"))
@@ -732,24 +772,40 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             "comment",
         }:
             raise DomainError("Неизвестное поле.")
-        value = (
-            parse_date(message.text)
-            if field == "start_date"
-            else optional(message.text, "Значение", 4000)
-        )
-        if field == "telegram_id" and value is not None:
-            if not value.isascii() or not value.isdigit() or not 0 < int(value) < 2**63:
+        name = employee.name
+        phone = employee.phone
+        payment_details = None
+        telegram_id = employee.telegram_id
+        comment = employee.comment
+        start_date = None
+        value = message_text(message)
+        if field == "start_date":
+            start_date = parse_date(value)
+        elif field == "name":
+            name = clean_text(value, "ФИО", 200, required=True)
+        elif field == "phone":
+            phone = optional(value, "Телефон", 50)
+        elif field == "payment_details":
+            payment_details = optional(value, "Реквизиты", 1000) or ""
+        elif field == "telegram_id":
+            raw_id = optional(value, "Telegram ID", 30)
+            if raw_id is not None and (
+                not raw_id.isascii() or not raw_id.isdigit() or not 0 < int(raw_id) < 2**63
+            ):
                 raise DomainError("Введите положительный числовой Telegram ID или «-».")
-            value = int(value)
-        values = {
-            "name": employee.name,
-            "phone": employee.phone,
-            "payment_details": employee.payment_details,
-            "telegram_id": employee.telegram_id,
-            "comment": employee.comment,
-        }
-        values[field] = value if field != "payment_details" else (value or "")
-        services.employees.update(employee.id, **values, actor=message.from_user.id)
+            telegram_id = int(raw_id) if raw_id is not None else None
+        else:
+            comment = optional(value, "Примечание", 4000)
+        services.employees.update(
+            employee.id,
+            name=name,
+            phone=phone,
+            payment_details=payment_details,
+            telegram_id=telegram_id,
+            comment=comment,
+            start_date=start_date,
+            actor=actor_id(message),
+        )
         await state.set_state(None)
         await employee_card(message, employee.id)
 
@@ -887,7 +943,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
 
     @router.message(UnratedForm.amount)
     async def price_preview(message: Message, state: FSMContext):
-        rate = money(message.text)
+        rate = money(message_text(message))
         row = services.attendance.get((await state.get_data())["attendance_id"])
         employee = services.employees.get(row.employee_id)
         obj = services.objects.get(row.object_id)
@@ -987,7 +1043,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
 
     @router.message(ObjectPaymentForm.amount)
     async def payment_amount(message: Message, state: FSMContext):
-        await state.update_data(amount=str(money(message.text)))
+        await state.update_data(amount=str(money(message_text(message))))
         await show_payment_preview(message, state)
 
     @router.callback_query(ObjectPaymentForm.confirm, F.data == "payment:date")
@@ -1024,7 +1080,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
 
     @router.message(ObjectPaymentForm.custom_date)
     async def payment_custom_date(message: Message, state: FSMContext):
-        await payment_date_selected(message, state, parse_date(message.text))
+        await payment_date_selected(message, state, parse_date(message_text(message)))
 
     @router.message(ObjectPaymentForm.comment)
     async def payment_preview(message: Message, state: FSMContext):
@@ -1158,7 +1214,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     async def save_rate(message: Message, state: FSMContext):
         data = await state.get_data()
         team.set_rate(
-            data["member_id"], optional(message.text, "Стоимость", 30), actor=message.from_user.id
+            data["member_id"], optional(message.text, "Стоимость", 30), actor=actor_id(message)
         )
         await show_member(message, state, data["member_id"])
 
@@ -1272,7 +1328,9 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
 
     @router.message(ShiftForm.custom_date)
     async def shift_custom_date(message: Message, state: FSMContext):
-        await state.update_data(work_date=parse_date(message.text).isoformat(), employee_ids=[])
+        await state.update_data(
+            work_date=parse_date(message_text(message)).isoformat(), employee_ids=[]
+        )
         await shift_picker(message, state)
 
     @router.callback_query(ShiftForm.people, F.data.regexp(r"^toggle:[0-9a-f-]{36}:[0-9a-f]{12}$"))
@@ -1289,7 +1347,10 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.update_data(employee_ids=sorted(selected))
         await callback.answer()
         # Replace the picker rather than adding one message per selected employee.
-        markup = callback.message.reply_markup.model_copy(
+        current_markup = callback.message.reply_markup
+        if current_markup is None:
+            raise DomainError("Список смен устарел. Откройте объект заново.")
+        markup = current_markup.model_copy(
             update={
                 "inline_keyboard": [
                     [
@@ -1300,11 +1361,11 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
                         )
                         if button.callback_data == callback.data
                         else button.model_copy(update={"text": shift_save_label(len(selected))})
-                        if button.callback_data.startswith("shift:preview:")
+                        if (button.callback_data or "").startswith("shift:preview:")
                         else button
                         for button in row
                     ]
-                    for row in callback.message.reply_markup.inline_keyboard
+                    for row in current_markup.inline_keyboard
                 ]
             }
         )
