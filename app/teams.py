@@ -5,50 +5,13 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.models import Attendance, Employee, EmployeeRate, ObjectEmployee, WorkObject
+from app.models import Attendance, Employee, ObjectEmployee, WorkObject
 from app.services import Conflict, DomainError, NotFound, audit, money
 
 
 class TeamService:
     def __init__(self, sessions):
         self.sessions = sessions
-
-    def add(self, object_id: str, employee_id: str, *, shift_rate, actor: int):
-        rate = money(shift_rate) if shift_rate is not None else None
-        try:
-            with self.sessions() as session, session.begin():
-                obj = session.get(WorkObject, object_id)
-                employee = session.get(Employee, employee_id)
-                if obj is None or obj.status != "active":
-                    raise NotFound("Активный объект не найден.")
-                if employee is None or employee.status != "active":
-                    raise NotFound("Активный сотрудник не найден.")
-                row = session.scalar(
-                    select(ObjectEmployee).where(
-                        ObjectEmployee.object_id == object_id,
-                        ObjectEmployee.employee_id == employee_id,
-                    )
-                )
-                if row is not None and row.active:
-                    raise Conflict("Сотрудник уже добавлен на этот объект.")
-                restored = row is not None
-                if row is None:
-                    row = ObjectEmployee(object_id=object_id, employee_id=employee_id)
-                    session.add(row)
-                row.active = True
-                row.shift_rate = rate
-                session.flush()
-                audit(
-                    session,
-                    actor,
-                    "employee_returned_to_object" if restored else "employee_added_to_object",
-                    "object_employee",
-                    row.id,
-                    after={"object_id": object_id, "employee_id": employee_id},
-                )
-            return row
-        except IntegrityError as exc:
-            raise Conflict("Сотрудник уже добавлен на этот объект.") from exc
 
     def add_many(self, object_id: str, employee_ids, *, actor: int):
         ids = list(dict.fromkeys(employee_ids))
@@ -161,23 +124,6 @@ class TeamService:
                     .where(Employee.status == "active", Employee.id.not_in(assigned))
                     .order_by(Employee.name)
                 )
-            )
-
-    def effective_rate(self, member_id: str, on_date: date):
-        with self.sessions() as session:
-            member = session.get(ObjectEmployee, member_id)
-            if member is None:
-                raise NotFound("Сотрудник не найден в составе объекта.")
-            if member.shift_rate is not None:
-                return member.shift_rate
-            return session.scalar(
-                select(EmployeeRate.daily_rate)
-                .where(
-                    EmployeeRate.employee_id == member.employee_id,
-                    EmployeeRate.valid_from <= on_date,
-                )
-                .order_by(EmployeeRate.valid_from.desc())
-                .limit(1)
             )
 
     def roster(self, object_id: str, *, active_only=False):

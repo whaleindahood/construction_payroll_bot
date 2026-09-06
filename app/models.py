@@ -36,20 +36,15 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("role IN ('OWNER', 'MANAGER', 'ACCOUNTANT', 'EMPLOYEE')"),)
 
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    role: Mapped[str] = mapped_column(String(20), default="OWNER")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Employee(Base):
     __tablename__ = "employees"
-    __table_args__ = (
-        CheckConstraint("status IN ('active', 'inactive')"),
-        CheckConstraint("length(currency) = 3"),
-    )
+    __table_args__ = (CheckConstraint("status IN ('active', 'inactive')"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), index=True)
@@ -58,7 +53,6 @@ class Employee(Base):
     payment_details: Mapped[str | None] = mapped_column(Text)
     invite_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     invite_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    currency: Mapped[str] = mapped_column(String(3))
     start_date: Mapped[date] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     comment: Mapped[str | None] = mapped_column(Text)
@@ -66,30 +60,6 @@ class Employee(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
-
-    rates: Mapped[list[EmployeeRate]] = relationship(
-        back_populates="employee", cascade="all, delete-orphan"
-    )
-
-
-class EmployeeRate(Base):
-    __tablename__ = "employee_rates"
-    __table_args__ = (
-        UniqueConstraint("employee_id", "valid_from"),
-        CheckConstraint("daily_rate > 0"),
-        CheckConstraint("length(currency) = 3"),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id"), index=True)
-    valid_from: Mapped[date] = mapped_column(Date)
-    daily_rate: Mapped[Decimal] = mapped_column(Numeric(14, 2))
-    currency: Mapped[str] = mapped_column(String(3))
-    created_by: Mapped[int] = mapped_column(BigInteger)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    employee: Mapped[Employee] = relationship(back_populates="rates")
-
 
 class WorkObject(Base):
     __tablename__ = "objects"
@@ -137,22 +107,16 @@ class Attendance(Base):
             sqlite_where=text("voided_at IS NULL"),
             postgresql_where=text("voided_at IS NULL"),
         ),
-        CheckConstraint("coefficient > 0 AND coefficient <= 2"),
         CheckConstraint("rate_snapshot > 0"),
         CheckConstraint("earned_amount >= 0"),
-        CheckConstraint("length(currency) = 3"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id"), index=True)
     object_id: Mapped[str] = mapped_column(ForeignKey("objects.id"), index=True)
     work_date: Mapped[date] = mapped_column(Date, index=True)
-    status: Mapped[str] = mapped_column(String(20), default="worked")
-    coefficient: Mapped[Decimal] = mapped_column(Numeric(5, 2))
     rate_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
-    currency: Mapped[str] = mapped_column(String(3))
     earned_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
-    comment: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(150))
     created_by: Mapped[int] = mapped_column(BigInteger)
     modified_by: Mapped[int | None] = mapped_column(BigInteger)
@@ -173,17 +137,13 @@ class Payment(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key"),
         CheckConstraint("amount > 0"),
-        CheckConstraint("length(currency) = 3"),
-        CheckConstraint("method IN ('cash', 'bank', 'other')"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     employee_id: Mapped[str] = mapped_column(ForeignKey("employees.id"), index=True)
-    object_id: Mapped[str | None] = mapped_column(ForeignKey("objects.id"), index=True)
+    object_id: Mapped[str] = mapped_column(ForeignKey("objects.id"), index=True)
     payment_date: Mapped[date] = mapped_column(Date, index=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
-    currency: Mapped[str] = mapped_column(String(3))
-    method: Mapped[str] = mapped_column(String(20))
     comment: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(150))
     created_by: Mapped[int] = mapped_column(BigInteger)
@@ -197,7 +157,7 @@ class Payment(Base):
     void_reason: Mapped[str | None] = mapped_column(Text)
 
     employee: Mapped[Employee] = relationship()
-    object: Mapped[WorkObject | None] = relationship()
+    object: Mapped[WorkObject] = relationship()
 
 
 class AuditLog(Base):

@@ -13,22 +13,20 @@ from tests.test_employee_self_service import telegram_callback
 
 def test_pricing_and_payments_keep_all_worked_shifts(services):
     employee = services["employees"].create(
-        name="Иван", currency="RUB", start_date=date(2020, 1, 1), actor=1001
+        name="Иван", start_date=date(2020, 1, 1), actor=1001
     )
     objects = [
         services["objects"].create(name=name, start_date=date(2020, 1, 1), actor=1001)
         for name in ("Дом", "Школа")
     ]
     team = TeamService(services["sessions"])
-    members = [team.add(obj.id, employee.id, shift_rate=None, actor=1001) for obj in objects]
+    members = [team.add_many(obj.id, [employee.id], actor=1001)[0] for obj in objects]
     rows = [
         services["attendance"].create_bulk(
             employee_ids=[employee.id],
             object_id=obj.id,
             work_date=date(2020, 1, 2),
-            coefficient="1",
             actor=1001,
-            require_assignment=True,
             operation_key=obj.id,
         )[0]
         for obj in objects
@@ -41,7 +39,6 @@ def test_pricing_and_payments_keep_all_worked_shifts(services):
         object_id=objects[0].id,
         payment_date=date(2020, 1, 2),
         amount="2000",
-        method="bank",
         actor=1001,
         idempotency_key="full-payment",
     )
@@ -57,17 +54,19 @@ def test_pricing_and_payments_keep_all_worked_shifts(services):
         services["attendance"].price_unrated(rows[1].id, "500", actor=1001)
 
 
-def test_old_buttons_never_target_current_unrelated_card(services):
+def test_bound_buttons_never_target_current_unrelated_card(services):
     sessions = services["sessions"]
     employee = services["employees"].create(
-        name="Иван", currency="RUB", start_date=date(2020, 1, 1), actor=1001
+        name="Иван", start_date=date(2020, 1, 1), actor=1001
     )
     one, two = [
         services["objects"].create(name=name, start_date=date(2020, 1, 1), actor=1001)
         for name in ("Дом", "Школа")
     ]
     team = TeamService(sessions)
-    a, b = [team.add(obj.id, employee.id, shift_rate="2000", actor=1001) for obj in (one, two)]
+    a, b = [team.add_many(obj.id, [employee.id], actor=1001)[0] for obj in (one, two)]
+    team.set_rate(a.id, "2000", actor=1001)
+    team.set_rate(b.id, "2000", actor=1001)
     configured, dispatcher = compose(
         Settings(
             bot_token="123456:abcdefghijklmnopqrstuvwxyzABCDE",
@@ -146,9 +145,9 @@ def test_old_buttons_never_target_current_unrelated_card(services):
         await click(new_save)
         assert len(team.day(two.id, today)) == 1
 
-        await click(f"membermore:{a.id}")
+        await click(f"member:{a.id}")
         old_rate, old_settings = action("memberrate:"), markup()
-        await click(f"membermore:{b.id}")
+        await click(f"member:{b.id}")
         await click(old_rate, old_settings)
         await send("999")
         assert team.get(a.id).shift_rate == 999
@@ -167,10 +166,8 @@ def test_old_buttons_never_target_current_unrelated_card(services):
             employee_ids=[employee.id],
             object_id=one.id,
             work_date=today,
-            coefficient="1",
             actor=1001,
             operation_key="unrated",
-            require_assignment=True,
         )[0]
         row_b = team.day(two.id, today)[0]
         await click(f"undo:{row_a.id}")
@@ -182,7 +179,7 @@ def test_old_buttons_never_target_current_unrelated_card(services):
         await click(f"undook:{row_b.id}")
         assert services["attendance"].get(row_b.id).voided_at is not None
 
-        await click(f"membermore:{a.id}")
+        await click(f"member:{a.id}")
         await click(action("unrated:"))
         await click(action("price:"))
         await send("1500")
@@ -197,7 +194,7 @@ def test_old_buttons_never_target_current_unrelated_card(services):
         await send("1500")
         await click(action("payok:"))
         assert "Смен: 1" in bot.calls[-1].text
-        assert "Осталось выплатить: 0.00 RUB" in bot.calls[-1].text
+        assert "Осталось выплатить: 0.00 ₽" in bot.calls[-1].text
         await click(f"shifts:{a.id}:0")
         assert action("undo:") == f"undo:{row_a.id}"
         await bot.session.close()

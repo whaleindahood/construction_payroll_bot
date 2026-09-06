@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime
 
 from alembic.config import Config
-from sqlalchemy import MetaData, Table, create_engine, select
+from sqlalchemy import MetaData, Table, create_engine, inspect, select
 
 from alembic import command
 
@@ -85,6 +85,16 @@ def test_object_migration_preserves_history_and_backfills_memberships(tmp_path, 
         )
     command.upgrade(config, "head")
     members = Table("object_employees", MetaData(), autoload_with=engine)
+    columns = {
+        table: {column["name"]: column for column in inspect(engine).get_columns(table)}
+        for table in ("attendance", "payments")
+    }
+    assert {"status", "coefficient", "currency", "comment"}.isdisjoint(
+        columns["attendance"]
+    )
+    assert "currency" not in columns["payments"]
+    assert "method" not in columns["payments"]
+    assert columns["payments"]["object_id"]["nullable"] is False
     with engine.connect() as connection:
         rows = connection.execute(select(members).order_by(members.c.object_id)).mappings().all()
         assert len(rows) == 2

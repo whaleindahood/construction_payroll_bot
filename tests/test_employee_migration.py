@@ -30,6 +30,8 @@ def test_employee_migration_preserves_existing_cards(tmp_path, monkeypatch):
         )
     command.upgrade(config, "head")
     upgraded = Table("employees", MetaData(), autoload_with=engine)
+    assert "currency" not in upgraded.c
+    assert "employee_rates" not in inspect(engine).get_table_names()
     with engine.connect() as connection:
         row = connection.execute(select(upgraded)).mappings().one()
         assert row["name"] == "Иван Петров"

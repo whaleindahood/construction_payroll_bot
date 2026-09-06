@@ -20,20 +20,20 @@ from tests.test_employee_self_service import telegram_callback
 def test_shifts_and_rates_are_separate_for_each_object(services):
     team = TeamService(services["sessions"])
     employee = services["employees"].create(
-        name="Иван", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+        name="Иван", start_date=date(2026, 1, 1), actor=1001
     )
     first, second = [
         services["objects"].create(name=name, start_date=date(2026, 1, 1), actor=1001)
         for name in ("Дом", "Школа")
     ]
-    member = team.add(first.id, employee.id, shift_rate="2000", actor=1001)
-    team.add(second.id, employee.id, shift_rate="3500", actor=1001)
+    member = team.add_many(first.id, [employee.id], actor=1001)[0]
+    second_member = team.add_many(second.id, [employee.id], actor=1001)[0]
+    team.set_rate(member.id, "2000", actor=1001)
+    team.set_rate(second_member.id, "3500", actor=1001)
     args = {
         "employee_ids": [employee.id],
         "work_date": date(2026, 1, 2),
-        "coefficient": "1",
         "actor": 1001,
-        "require_assignment": True,
     }
     one = services["attendance"].create_bulk(**args, object_id=first.id, operation_key="first")[0]
     two = services["attendance"].create_bulk(**args, object_id=second.id, operation_key="second")[0]
@@ -47,7 +47,7 @@ def test_shifts_and_rates_are_separate_for_each_object(services):
     with pytest.raises(Conflict):
         services["attendance"].create_bulk(**args, object_id=first.id, operation_key="duplicate")
     with pytest.raises(Conflict):
-        team.add(first.id, employee.id, shift_rate=None, actor=1001)
+        team.add_many(first.id, [employee.id], actor=1001)
     team.set_rate(member.id, "2500", actor=1001)
     three = services["attendance"].create_bulk(
         **(args | {"work_date": date(2026, 1, 3)}), object_id=first.id, operation_key="third"
@@ -66,23 +66,21 @@ def test_roster_required_and_rate_optional(services):
     team = TeamService(services["sessions"])
     obj = services["objects"].create(name="Дом", start_date=date(2026, 1, 1), actor=1001)
     employee = services["employees"].create(
-        name="Пётр", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+        name="Пётр", start_date=date(2026, 1, 1), actor=1001
     )
     args = {
         "employee_ids": [employee.id],
         "object_id": obj.id,
         "work_date": date(2026, 1, 2),
-        "coefficient": "1",
-        "require_assignment": True,
     }
     with pytest.raises(DomainError, match="состав объекта"):
         services["attendance"].preview(**args)
     with pytest.raises(DomainError, match="состав объекта"):
         services["attendance"].create_bulk(**args, actor=1001, operation_key="not-assigned")
-    member = team.add(obj.id, employee.id, shift_rate=None, actor=1001)
+    member = team.add_many(obj.id, [employee.id], actor=1001)[0]
     with pytest.raises(DomainError):
         team.set_rate(member.id, "NaN", actor=1001)
-    assert services["attendance"].preview(**args)[0].rate is None
+    assert services["attendance"].preview(**args)[0].id == employee.id
     row = services["attendance"].create_bulk(**args, actor=1001, operation_key="without-rate")[0]
     assert row.rate_snapshot is row.earned_amount is None
     assert team.roster(obj.id)[0][2] == 1
@@ -96,19 +94,18 @@ def test_mass_attach_and_effective_object_rate_keep_attendance_snapshots(service
     obj = services["objects"].create(name="Дом", start_date=date(2026, 1, 1), actor=1001)
     first = services["employees"].create(
         name="Иван",
-        rate="2000",
-        currency="RUB",
         start_date=date(2026, 1, 1),
         actor=1001,
     )
     second = services["employees"].create(
-        name="Руслан", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+        name="Руслан", start_date=date(2026, 1, 1), actor=1001
     )
     assert {row.id for row in team.available(obj.id)} == {first.id, second.id}
     members = team.add_many(obj.id, [first.id, second.id], actor=1001)
     assert len(members) == 2
-    assert team.effective_rate(members[0].id, date(2026, 1, 2)) == Decimal(2000)
-    assert team.effective_rate(members[1].id, date(2026, 1, 2)) is None
+    team.set_rate(members[0].id, "2000", actor=1001)
+    assert team.get(members[0].id).shift_rate == Decimal(2000)
+    assert team.get(members[1].id).shift_rate is None
     assert team.available(obj.id) == []
     with pytest.raises(Conflict):
         team.add_many(obj.id, [first.id], actor=1001)
@@ -117,20 +114,16 @@ def test_mass_attach_and_effective_object_rate_keep_attendance_snapshots(service
         employee_ids=[first.id],
         object_id=obj.id,
         work_date=date(2026, 1, 2),
-        coefficient="1",
         actor=1001,
         operation_key="base-rate",
-        require_assignment=True,
     )[0]
     team.set_rate(members[0].id, "2500", actor=1001)
     new = services["attendance"].create_bulk(
         employee_ids=[first.id],
         object_id=obj.id,
         work_date=date(2026, 1, 3),
-        coefficient="1",
         actor=1001,
         operation_key="object-rate",
-        require_assignment=True,
     )[0]
     assert old.rate_snapshot == Decimal(2000)
     assert new.rate_snapshot == Decimal(2500)
@@ -140,19 +133,19 @@ def test_mass_attach_and_effective_object_rate_keep_attendance_snapshots(service
 def test_membership_removal_preserves_separate_balances_and_history(services):
     team = TeamService(services["sessions"])
     employee = services["employees"].create(
-        name="Иван", currency="RUB", start_date=date(2026, 1, 1), actor=1001
+        name="Иван", start_date=date(2026, 1, 1), actor=1001
     )
     first, second = [
         services["objects"].create(name=name, start_date=date(2026, 1, 1), actor=1001)
         for name in ("Дом", "Школа")
     ]
-    member = team.add(first.id, employee.id, shift_rate="2000", actor=1001)
-    team.add(second.id, employee.id, shift_rate="3500", actor=1001)
+    member = team.add_many(first.id, [employee.id], actor=1001)[0]
+    second_member = team.add_many(second.id, [employee.id], actor=1001)[0]
+    team.set_rate(member.id, "2000", actor=1001)
+    team.set_rate(second_member.id, "3500", actor=1001)
     args = {
         "employee_ids": [employee.id],
         "work_date": date(2026, 1, 2),
-        "coefficient": "1",
-        "require_assignment": True,
         "actor": 1001,
     }
     first_shift = services["attendance"].create_bulk(
@@ -162,7 +155,6 @@ def test_membership_removal_preserves_separate_balances_and_history(services):
     payment_args = {
         "employee_id": employee.id,
         "payment_date": date(2026, 1, 2),
-        "method": "bank",
         "actor": 1001,
     }
     payment = services["payments"].create(
@@ -171,8 +163,6 @@ def test_membership_removal_preserves_separate_balances_and_history(services):
     services["payments"].create(
         **payment_args, object_id=second.id, amount="4000", idempotency_key="advance-two"
     )
-    # Historical payments without an object must never offset a particular object's debt.
-    services["payments"].create(**payment_args, amount="9999", idempotency_key="legacy-unallocated")
     team.set_active(member.id, False, actor=1001)
     assert team.roster(first.id, active_only=True) == []
     assert team.roster(first.id)[0][2] == 1
@@ -184,15 +174,12 @@ def test_membership_removal_preserves_separate_balances_and_history(services):
     assert services["payroll"].summary(employee.id, object_id=second.id).balance == -500
     assert team.history(first.id, employee.id)[0].id == first_shift.id
     assert services["payments"].history(employee.id, first.id)[0].id == payment.id
-    for require_assignment in (True, False):
-        with pytest.raises(DomainError, match="убран"):
-            services["attendance"].create_bulk(
-                **(
-                    args | {"work_date": date(2026, 1, 3), "require_assignment": require_assignment}
-                ),
-                object_id=first.id,
-                operation_key="removed",
-            )
+    with pytest.raises(DomainError, match="убран"):
+        services["attendance"].create_bulk(
+            **(args | {"work_date": date(2026, 1, 3)}),
+            object_id=first.id,
+            operation_key="removed",
+        )
     # Debts can be settled after removal from the team.
     services["payments"].create(
         **payment_args, object_id=first.id, amount="1500", idempotency_key="settlement"
@@ -201,8 +188,9 @@ def test_membership_removal_preserves_separate_balances_and_history(services):
     team.set_active(member.id, True, actor=1001)
     assert team.get(member.id).shift_rate == 2000
     team.set_active(member.id, False, actor=1001)
-    returned = team.add(first.id, employee.id, shift_rate="2500", actor=1001)
+    returned = team.add_many(first.id, [employee.id], actor=1001)[0]
     assert returned.id == member.id
+    team.set_rate(returned.id, "2500", actor=1001)
     services["attendance"].create_bulk(
         **(args | {"work_date": date(2026, 1, 3)}), object_id=first.id, operation_key="returned"
     )
@@ -399,11 +387,11 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         )
 
         await click(f"obj:{first}")
-        assert "Иванов Иван Иванович — 2 000 RUB/смена • 1 смен" in bot.calls[-1].text
-        assert "Петров Пётр Петрович — не указана RUB/смена • 1 смен" in bot.calls[-1].text
+        assert "Иванов Иван Иванович — 2 000 ₽/смена • 1 смен" in bot.calls[-1].text
+        assert "Петров Пётр Петрович — не указана ₽/смена • 1 смен" in bot.calls[-1].text
         member = next(member for member, emp, _ in team.roster(first) if emp.id == employee.id)
         await click(f"member:{member.id}")
-        assert "Ставка: 2 000 RUB/смена" in bot.calls[-1].text
+        assert "Ставка: 2 000 ₽/смена" in bot.calls[-1].text
         assert any(
             button.callback_data == f"quickshift:{member.id}"
             for row in bot.calls[-1].reply_markup.inline_keyboard
@@ -430,7 +418,6 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         await send("-")
         assert employees.get(employee.id).payment_details is None
         await click(f"member:{member.id}")
-        await click(f"membermore:{member.id}")
         await click(f"memberrate:{member.id}")
         await send("2500")
         assert team.get(member.id).shift_rate == Decimal(2500)
@@ -520,7 +507,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
             assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 3
 
         await click(f"member:{member.id}")
-        assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
+        assert "Выплачено: 0.00 ₽" in bot.calls[-1].text
         await click(f"pay:{member.id}")
         await send("NaN")
         await send("3000")
@@ -536,7 +523,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         payment_confirm = action("payok:")
         await click(original_payment_confirm)
         await click(payment_confirm)
-        assert "Аванс: 3000.00 RUB" in bot.calls[-1].text
+        assert "Аванс: 3000.00 ₽" in bot.calls[-1].text
         await click(payment_confirm)  # repeating the confirmation cannot create a second payment
         await click(f"pays:{member.id}:0")
         payment_void = action("payvoid:")
@@ -546,9 +533,9 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert team.get(member.id).active
         await click(remove_confirm)
         assert not team.get(member.id).active
-        assert "Аванс: 3000.00 RUB" in bot.calls[-1].text
+        assert "Аванс: 3000.00 ₽" in bot.calls[-1].text
         assert employees.get(employee.id).status == "active"
-        await click(f"teamopen:{first}")
+        await click(f"obj:{first}")
         assert not any(
             button.callback_data == f"member:{member.id}"
             for row in bot.calls[-1].reply_markup.inline_keyboard
@@ -580,14 +567,14 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         other_confirm = action("payok:")
         await click(payment_confirm)  # stale first-object approval cannot pay on the second object
         await click(other_confirm)
-        assert "Осталось выплатить: 3000.00 RUB" in bot.calls[-1].text
+        assert "Осталось выплатить: 3000.00 ₽" in bot.calls[-1].text
         await click(payment_void)
         void_confirm = action("payvoidok:")
         await click(void_confirm, user=9999)
         await click(void_confirm)
-        assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
+        assert "Выплачено: 0.00 ₽" in bot.calls[-1].text
         await click(f"member:{other_member.id}")
-        assert "Выплачено: 500.00 RUB" in bot.calls[-1].text
+        assert "Выплачено: 500.00 ₽" in bot.calls[-1].text
         await click(f"member:{member.id}")
         await click(f"teamcsv:{first}")
         assert "Выплачено" in bot.calls[-1].document.data.decode("utf-8-sig")
@@ -610,9 +597,9 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert "Отметьте пришедших" in bot.calls[-1].text
         await click(f"pay:{member.id}")
         await send("/cancel")
-        assert "Выплачено: 0.00 RUB" in bot.calls[-1].text
+        assert "Выплачено: 0.00 ₽" in bot.calls[-1].text
         # A bound object button must open its original object even after another card was opened.
-        await click(f"teamopen:{second}")
+        await click(f"obj:{second}")
         assert "Второй объект" in bot.calls[-1].text
         await click(f"reportobj:{first}")
         assert "Первый объект" in bot.calls[-1].text

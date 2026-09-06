@@ -14,7 +14,7 @@ Telegram bot for tracking employee shifts separately on each construction object
    **Заполнить позже** skips the payment details. Phone and Telegram ID remain
    available under personal data editing, rather than in the creation dialog.
 3. Set an optional shift rate in rubles for that employee on that object.
-   No rate or currency choice is required to count shifts.
+   A rate is not required to count shifts.
 4. Each working day use **Отметить смены**, check the employees who attended,
    and confirm. Today's date is selected automatically; **Изменить дату** lets
    you choose another day and clears unsaved selections from the previous date.
@@ -27,8 +27,7 @@ Telegram bot for tracking employee shifts separately on each construction object
 One recorded date is one visit/shift on that object. A repeated confirmation or
 another attempt to record the same employee/object/date cannot add a duplicate.
 The same person can attend different objects on the same day. Future shifts are
-not allowed. Historical fractional attendance remains stored as originally
-entered; the new counters count recorded visits, not fractional coefficients.
+not allowed. Every attendance record represents one full shift.
 
 Use **object → employee → История → Смены** to review dates and
 confirm cancellation of an erroneous entry. The count is derived from active
@@ -36,10 +35,9 @@ attendance records; cancelled entries remain in the database and audit log.
 CSV/XLSX exports contain employee names, lifetime shift counts, membership status,
 earnings, payments and balances for the selected object, including former members.
 
-A shift rate belongs to an employee/object pair. If it is omitted, the latest
-applicable base employee rate is used. Changing the object rate applies to shifts
+A shift rate belongs to an employee/object pair. Changing it applies to shifts
 recorded afterwards, including dates entered retrospectively; old snapshots are
-never recalculated. Both rates can be omitted. If a historical shift has no rate,
+never recalculated. A rate can be omitted. If a shift has no rate,
 the employee's object card shows how many shifts lack a rate, sums only known
 earnings and does not present an incomplete balance as a final amount.
 
@@ -55,8 +53,7 @@ never remove shifts from history or reduce the number of worked shifts.
 Select an employee on the object card. The card shows earnings,
 payments and the remaining debt for that employee on this object over all time.
 A negative balance is displayed as an advance. Balances are never offset across
-objects. Legacy payments without an object remain stored and are not allocated
-automatically to any object's balance.
+objects. Every payment belongs to one object.
 
 Use **Записать выплату**, enter the amount and confirm. Today's date is selected
 automatically. **Изменить дату** and **Комментарий** are optional actions on the
@@ -84,8 +81,8 @@ membership periods or partial shifts are required.
 **Настройки объекта** contains editing name, address, start date, description,
 notes, completion and deletion. These actions are outside the daily work screen.
 Employee cards support editing full name, phone, payment details, Telegram ID,
-start date and notes. A start date cannot move beyond existing shifts (or legacy
-employee rates), so editing cannot invalidate recorded history.
+start date and notes. A start date cannot move beyond existing shifts, so editing
+cannot invalidate recorded history.
 
 **Удалить объект / Удалить сотрудника из базы** asks for confirmation. Employee
 deletion is under **Личные данные → Изменить данные**. Deleted cards move

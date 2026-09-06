@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///payroll.db"
     owner_ids: Annotated[set[int], NoDecode] = Field(default_factory=set)
     timezone: str = "Europe/Amsterdam"
-    default_currency: str = "RUB"
 
     @field_validator("owner_ids", mode="before")
     @classmethod
@@ -32,12 +31,4 @@ class Settings(BaseSettings):
             ZoneInfo(value)
         except ZoneInfoNotFoundError as exc:
             raise ValueError("unknown IANA timezone") from exc
-        return value
-
-    @field_validator("default_currency")
-    @classmethod
-    def valid_currency(cls, value: str) -> str:
-        value = value.strip().upper()
-        if len(value) != 3 or not value.isascii() or not value.isalpha():
-            raise ValueError("currency must be a 3-letter ISO code")
         return value

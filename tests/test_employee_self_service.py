@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 
 import pytest
 from aiogram.types import CallbackQuery, Chat, Message, Update
@@ -20,8 +19,6 @@ from tests.test_bot_end_to_end import FakeBot, telegram_message
 def create_employee(employees, name="Иван", telegram_id=None):
     return employees.create(
         name=name,
-        rate="2500",
-        currency="RUB",
         start_date=date(2026, 1, 1),
         actor=1001,
         telegram_id=telegram_id,
@@ -68,7 +65,6 @@ def test_self_profile_is_scoped_validated_and_does_not_change_payroll(services):
     assert updated.id == first.id
     assert employees.get(second.id).name == "Пётр"
     assert employees.get(second.id).payment_details is None
-    assert employees.effective_rate(first.id, date(2026, 1, 1)).daily_rate == Decimal(2500)
     with pytest.raises(DomainError):
         employees.update_own_profile(2001, name="", payment_details="банк")
     with pytest.raises(DomainError):

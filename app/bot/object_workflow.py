@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.bot import keyboards as kb
 from app.bot.common import Services, answer_long, parse_date
 from app.reports import table_csv, table_xlsx
-from app.services import DomainError, as_money, clean_text, money
+from app.services import DomainError, clean_text, money
 from app.teams import TeamService
 
 
@@ -155,9 +155,8 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         text += ["", f"👷 Рабочие на объекте: {len(rows)}"]
         if rows:
             for member, employee, count in rows:
-                rate = team.effective_rate(member.id, today())
                 text.append(
-                    f"{employee.name} — {formatted_money(rate)} {employee.currency}/смена"
+                    f"{employee.name} — {formatted_money(member.shift_rate)} ₽/смена"
                     f" • {count} смен"
                 )
         else:
@@ -611,8 +610,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     async def person_preview(message, state):
         data = await state.get_data()
         lines = ["Проверьте карточку:", data["person_name"]]
-        if not data.get("existing_employee_id"):
-            lines.append(f"Реквизиты: {data.get('person_details') or 'заполнят позже'}")
+        lines.append(f"Реквизиты: {data.get('person_details') or 'заполнят позже'}")
         if data.get("object_id"):
             lines += [
                 f"Объект: {services.objects.get(data['object_id']).name}",
@@ -637,29 +635,17 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         data = await state.get_data()
         if callback.data.split(":", 1)[1] != data["person_token"]:
             raise DomainError("Подтверждение устарело. Проверьте текущую карточку.")
-        if data.get("existing_employee_id"):
-            employee_id = data["existing_employee_id"]
-            team.add(
-                data["object_id"],
-                employee_id,
-                shift_rate=data.get("shift_rate"),
-                actor=callback.from_user.id,
-            )
-        else:
-            employee = services.employees.create(
-                name=data["person_name"],
-                phone=data.get("person_phone"),
-                payment_details=data.get("person_details"),
-                telegram_id=data.get("person_telegram"),
-                currency="RUB",
-                start_date=date.fromisoformat(data["work_date"])
-                if data.get("work_date")
-                else today(),
-                actor=callback.from_user.id,
-                object_id=data.get("object_id"),
-                shift_rate=data.get("shift_rate"),
-            )
-            employee_id = employee.id
+        employee = services.employees.create(
+            name=data["person_name"],
+            payment_details=data.get("person_details"),
+            start_date=date.fromisoformat(data["work_date"])
+            if data.get("work_date")
+            else today(),
+            actor=callback.from_user.id,
+            object_id=data.get("object_id"),
+            shift_rate=data.get("shift_rate"),
+        )
+        employee_id = employee.id
         await callback.answer("Сохранено")
         await state.clear()
         if data.get("object_id"):
@@ -767,36 +753,24 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(None)
         await employee_card(message, employee.id)
 
-    @router.callback_query(F.data.regexp(r"^team(open|former):[0-9a-f-]{36}$"))
-    async def roster(callback: CallbackQuery, state: FSMContext):
+    @router.callback_query(F.data.regexp(r"^teamformer:[0-9a-f-]{36}$"))
+    async def former_roster(callback: CallbackQuery, state: FSMContext):
         object_id = callback.data.split(":", 1)[1]
         await callback.answer()
-        await show_roster(
-            callback.message, state, object_id, former=callback.data.startswith("teamformer:")
-        )
-
-    async def show_roster(message, state, object_id, *, former=False):
         obj = services.objects.get(object_id)
-        all_rows = team.roster(obj.id)
         rows = [
             (member, emp, count)
-            for member, emp, count in all_rows
-            if (member.active and emp.status == "active") != former
+            for member, emp, count in team.roster(obj.id)
+            if not member.active or emp.status != "active"
         ]
         await state.clear()
         await state.update_data(object_id=obj.id)
         actions = [
             (f"{emp.name} · {count} смен", f"member:{member.id}") for member, emp, count in rows
         ]
-        if not former and obj.status == "active":
-            actions.append(("➕ Добавить сотрудника", f"teamadd:{obj.id}"))
-        if former:
-            actions.append(("← Сотрудники объекта", f"teamopen:{obj.id}"))
-        elif len(rows) != len(all_rows):
-            actions.append(("Бывшие сотрудники", f"teamformer:{obj.id}"))
         actions.append(("← Объект", f"obj:{obj.id}"))
-        await message.answer(
-            f"{'Бывшие сотрудники' if former else 'Сотрудники объекта'} · {obj.name}\n"
+        await callback.message.answer(
+            f"Бывшие сотрудники · {obj.name}\n"
             + ("Выберите сотрудника." if rows else "Список пуст."),
             reply_markup=buttons(*actions),
         )
@@ -815,15 +789,14 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.update_data(object_id=obj.id, member_id=member.id)
         summary = services.payroll.summary(employee.id, object_id=obj.id)
         balance = (
-            f"Осталось выплатить: {summary.balance} {summary.currency}"
+            f"Осталось выплатить: {summary.balance} ₽"
             if summary.balance >= 0
-            else f"Аванс: {-summary.balance} {summary.currency}"
+            else f"Аванс: {-summary.balance} ₽"
         )
         if summary.unrated_shifts:
             balance = (
                 f"Смен без ставки: {summary.unrated_shifts}. Итоговый остаток пока не определён."
             )
-        effective_rate = team.effective_rate(member.id, today())
         actions = []
         if member.active and employee.status == "active" and obj.status == "active":
             actions.extend(
@@ -853,38 +826,23 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await message.answer(
             f"👷 {employee.name}\n🏗 {obj.name}\n"
             + ("Убран из состава\n" if not member.active else "")
-            + f"\nСтавка: {formatted_money(effective_rate)} {employee.currency}/смена\n"
+            + f"\nСтавка: {formatted_money(member.shift_rate)} ₽/смена\n"
             f"Смен: {count}\n"
             f"Начислено{' по сменам со ставкой' if summary.unrated_shifts else ''}: "
-            f"{summary.earned} {summary.currency}\n"
-            f"Выплачено: {summary.paid} {summary.currency}\n{balance}",
+            f"{summary.earned} ₽\n"
+            f"Выплачено: {summary.paid} ₽\n{balance}",
             reply_markup=buttons(*actions),
         )
 
-    @router.callback_query(F.data.regexp(r"^member(log|more):[0-9a-f-]{36}$"))
-    async def member_more(callback: CallbackQuery, state: FSMContext):
+    @router.callback_query(F.data.regexp(r"^memberlog:[0-9a-f-]{36}$"))
+    async def member_log(callback: CallbackQuery, state: FSMContext):
         member = team.get(callback.data.split(":", 1)[1])
         employee = services.employees.get(member.employee_id)
         obj = services.objects.get(member.object_id)
         await state.clear()
         await state.update_data(object_id=obj.id, member_id=member.id)
-        if callback.data.startswith("memberlog:"):
-            text = f"История · {employee.name}\n{obj.name}"
-            actions = [("Смены", f"shifts:{member.id}:0"), ("Выплаты", f"pays:{member.id}:0")]
-        else:
-            text = f"{employee.name}\n{obj.name}\n\nРеквизиты:\n{employee.payment_details or 'не заполнены'}"
-            actions = [
-                ("Ставка за смену", f"memberrate:{member.id}"),
-                ("Личные данные", f"emp:{employee.id}"),
-                (
-                    "Убрать с объекта" if member.active else "Вернуть на объект",
-                    f"membership:{int(not member.active)}:{member.id}",
-                ),
-            ]
-            if employee.telegram_id is None and employee.status == "active":
-                actions.insert(2, ("Пригласить заполнить данные", f"empinvite:{employee.id}"))
-            if team.unrated(member.id):
-                actions.insert(1, ("Смены без ставки", f"unrated:{member.id}"))
+        text = f"История · {employee.name}\n{obj.name}"
+        actions = [("Смены", f"shifts:{member.id}:0"), ("Выплаты", f"pays:{member.id}:0")]
         actions.append(("← Назад", f"member:{member.id}"))
         await callback.answer()
         await callback.message.answer(text, reply_markup=buttons(*actions))
@@ -923,7 +881,8 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(UnratedForm.amount)
         await callback.answer()
         await callback.message.answer(
-            f"{employee.name}\n{obj.name} · {row.work_date:%d.%m.%Y}\nВведите ставку за полную смену в {row.currency}:"
+            f"{employee.name}\n{obj.name} · {row.work_date:%d.%m.%Y}\n"
+            "Введите ставку за полную смену в рублях:"
         )
 
     @router.message(UnratedForm.amount)
@@ -937,7 +896,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(UnratedForm.confirm)
         await message.answer(
             f"Рассчитать смену?\n{employee.name}\n{obj.name} · {row.work_date:%d.%m.%Y}\n"
-            f"Ставка: {rate} {row.currency}\nНачисление: {as_money(row.coefficient * rate)} {row.currency}",
+            f"Ставка: {rate} ₽\nНачисление: {rate} ₽",
             reply_markup=buttons(("Подтвердить", f"priceok:{token}"), ("Отмена", "cancel")),
         )
 
@@ -999,7 +958,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             amount = (
                 "не рассчитано"
                 if summary.unrated_shifts
-                else f"остаток {summary.balance} {summary.currency}"
+                else f"остаток {summary.balance} ₽"
             )
             actions.append((f"{employee.name} · {amount}", f"pay:{member.id}"))
         actions.append(("← Объект", f"obj:{obj.id}"))
@@ -1023,7 +982,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await callback.answer()
         await callback.message.answer(
             f"Выплата / аванс: {employee.name}, объект «{obj.name}».\n"
-            f"Введите выплаченную сумму в {employee.currency}. Для отмены — /cancel."
+            "Введите выплаченную сумму в рублях. Для отмены — /cancel."
         )
 
     @router.message(ObjectPaymentForm.amount)
@@ -1083,7 +1042,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(ObjectPaymentForm.confirm)
         await message.answer(
             f"Записать выплату?\n{employee.name}\nОбъект: {obj.name}\n"
-            f"Сумма: {data['amount']} {employee.currency}\n"
+            f"Сумма: {data['amount']} ₽\n"
             f"Дата: {date.fromisoformat(data['payment_date']):%d.%m.%Y}\n"
             f"Комментарий: {comment or '—'}",
             reply_markup=buttons(
@@ -1108,7 +1067,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             object_id=member.object_id,
             amount=data["amount"],
             payment_date=payment_date,
-            method="other",
             comment=data["comment"],
             actor=callback.from_user.id,
             idempotency_key=f"object-payment:{data['token']}",
@@ -1126,7 +1084,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.clear()
         await state.update_data(object_id=obj.id, member_id=member.id)
         actions = [
-            (f"{row.payment_date:%d.%m.%Y} · {row.amount} {row.currency}", f"payvoid:{row.id}")
+            (f"{row.payment_date:%d.%m.%Y} · {row.amount} ₽", f"payvoid:{row.id}")
             for row in rows
         ]
         if int(offset):
@@ -1144,8 +1102,8 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     @router.callback_query(F.data.regexp(r"^payvoid:[0-9a-f-]{36}$"))
     async def payment_void_preview(callback: CallbackQuery, state: FSMContext):
         row = services.payments.get(callback.data.split(":", 1)[1])
-        if row.object_id is None or row.voided_at:
-            raise DomainError("Выплата без объекта или уже отменена.")
+        if row.voided_at:
+            raise DomainError("Выплата уже отменена.")
         member = next(
             (member for member, emp, _ in team.roster(row.object_id) if emp.id == row.employee_id),
             None,
@@ -1162,7 +1120,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(ObjectPaymentForm.void)
         await callback.answer()
         await callback.message.answer(
-            f"{employee.name}\nОбъект: {obj.name}\nВыплата: {row.amount} {row.currency}\n"
+            f"{employee.name}\nОбъект: {obj.name}\nВыплата: {row.amount} ₽\n"
             f"Дата: {row.payment_date:%d.%m.%Y}\nКомментарий: {row.comment or '—'}\n\n"
             "Отменить ошибочную запись? Остаток будет пересчитан.",
             reply_markup=buttons(
@@ -1192,7 +1150,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.set_state(EditForm.rate)
         await callback.answer()
         await callback.message.answer(
-            f"{employee.name}\n{obj.name}\nНовая ставка в {employee.currency} или «-». "
+            f"{employee.name}\n{obj.name}\nНовая ставка в рублях или «-». "
             "Она будет применяться при записи новых смен; сохраненные смены не пересчитываются."
         )
 
@@ -1210,8 +1168,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             employee_ids=data["employee_ids"],
             object_id=data["object_id"],
             work_date=date.fromisoformat(data["work_date"]),
-            coefficient="1",
-            require_assignment=True,
         )
         operation_key = f"shift:{uuid.uuid4()}"
         await state.update_data(operation_key=operation_key)
@@ -1219,7 +1175,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await answer_long(
             message,
             f"Записать смены за {date.fromisoformat(data['work_date']):%d.%m.%Y}?\n"
-            + "\n".join(f"{row.employee_name} — +1 смена" for row in rows),
+            + "\n".join(f"{employee.name} — +1 смена" for employee in rows),
             reply_markup=buttons(
                 ("✅ Подтвердить", f"shiftsave:{operation_key}"),
                 ("Изменить выбор", f"shiftchange:{operation_key}"),
@@ -1387,8 +1343,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             employee_ids=data["employee_ids"],
             object_id=data["object_id"],
             work_date=date.fromisoformat(data["work_date"]),
-            coefficient="1",
-            require_assignment=True,
             actor=callback.from_user.id,
             operation_key=data["operation_key"],
         )
@@ -1455,7 +1409,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             balance = (
                 "остаток не определён"
                 if summary.unrated_shifts
-                else f"остаток {summary.balance} {summary.currency}"
+                else f"остаток {summary.balance} ₽"
             )
             status = " · убран" if not member.active else ""
             lines.append(
@@ -1485,7 +1439,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
                     emp.name,
                     count,
                     "В составе" if member.active else "Убран из состава",
-                    summary.currency,
                     summary.earned,
                     summary.paid,
                     "Не определён" if summary.unrated_shifts else summary.balance,
@@ -1496,7 +1449,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
             "Сотрудник",
             "Смены",
             "Состав",
-            "Валюта",
             "Начислено по сменам со ставкой",
             "Выплачено",
             "Остаток (минус — аванс)",

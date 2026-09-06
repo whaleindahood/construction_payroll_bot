@@ -15,19 +15,17 @@ def test_object_report_and_exports(services):
         employee_ids=[employee.id],
         object_id=obj.id,
         work_date=date(2026, 9, 4),
-        coefficient="0.5",
         actor=ACTOR,
         operation_key="report-day",
     )
     summary = services["payroll"].summary(employee.id, object_id=obj.id)
-    rows = [[summary.employee_name, summary.currency, summary.earned, summary.paid]]
-    headers = ["Employee", "Currency", "Earned", "Paid"]
+    rows = [[employee.name, summary.earned, summary.paid]]
+    headers = ["Employee", "Earned", "Paid"]
     csv_data = table_csv(headers, rows)
     assert employee.name.encode("utf-8") in csv_data
     workbook = load_workbook(filename=__import__("io").BytesIO(table_xlsx(obj.name, headers, rows)))
     assert workbook.active["A2"].value == employee.name
-    assert workbook.active["B2"].value == employee.currency
-    assert workbook.active["C2"].value == float(summary.earned)
+    assert workbook.active["B2"].value == float(summary.earned)
 
 
 def test_telegram_update_claim_is_idempotent(services):

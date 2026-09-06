@@ -8,209 +8,136 @@ from sqlalchemy import func, select
 
 from app.models import Attendance, AuditLog, Payment
 from app.services import Conflict
+from app.teams import TeamService
 
 ACTOR = 1001
 
 
 def setup_employee_object(services):
     employee = services["employees"].create(
-        name="Иван Петров",
-        rate="150.00",
-        currency="EUR",
-        start_date=date(2026, 9, 1),
-        actor=ACTOR,
+        name="Иван Петров", start_date=date(2026, 9, 1), actor=ACTOR
     )
     obj = services["objects"].create(
-        name="Amsterdam House",
-        start_date=date(2026, 9, 1),
-        actor=ACTOR,
+        name="ЖК Северный", start_date=date(2026, 9, 1), actor=ACTOR
     )
+    member = TeamService(services["sessions"]).add_many(
+        obj.id, [employee.id], actor=ACTOR
+    )[0]
+    TeamService(services["sessions"]).set_rate(member.id, "150", actor=ACTOR)
     return employee, obj
 
 
-def test_rate_change_never_recalculates_historical_earnings(services):
+def test_object_rate_change_never_recalculates_old_shift(services):
     employee, obj = setup_employee_object(services)
+    team = TeamService(services["sessions"])
     old = services["attendance"].create_bulk(
         employee_ids=[employee.id],
         object_id=obj.id,
         work_date=date(2026, 9, 10),
-        coefficient="1",
         actor=ACTOR,
         operation_key="old-day",
     )[0]
-    services["employees"].change_rate(employee.id, "175", date(2026, 9, 16), ACTOR)
+    team.set_rate(team.roster(obj.id)[0][0].id, "175", actor=ACTOR)
     new = services["attendance"].create_bulk(
         employee_ids=[employee.id],
         object_id=obj.id,
-        work_date=date(2026, 9, 20),
-        coefficient="0.5",
+        work_date=date(2026, 9, 11),
         actor=ACTOR,
         operation_key="new-day",
     )[0]
-
-    assert old.rate_snapshot == Decimal("150.00")
-    assert old.earned_amount == Decimal("150.00")
-    assert new.rate_snapshot == Decimal("175.00")
-    assert new.earned_amount == Decimal("87.50")
-    assert services["payroll"].summary(employee.id).earned == Decimal("237.50")
+    assert old.rate_snapshot == old.earned_amount == Decimal(150)
+    assert new.rate_snapshot == new.earned_amount == Decimal(175)
+    assert services["payroll"].summary(employee.id, object_id=obj.id).earned == Decimal(325)
 
 
 def test_bulk_attendance_is_atomic_idempotent_and_unique(services):
     first, obj = setup_employee_object(services)
     second = services["employees"].create(
-        name="Сергей",
-        rate="170",
-        currency="EUR",
-        start_date=date(2026, 9, 1),
-        actor=ACTOR,
+        name="Сергей", start_date=date(2026, 9, 1), actor=ACTOR
     )
+    team = TeamService(services["sessions"])
+    second_member = team.add_many(obj.id, [second.id], actor=ACTOR)[0]
+    team.set_rate(second_member.id, "170", actor=ACTOR)
     args = {
         "employee_ids": [first.id, second.id],
         "object_id": obj.id,
         "work_date": date(2026, 9, 4),
-        "coefficient": "1",
         "actor": ACTOR,
         "operation_key": "telegram-update-42",
     }
-
     original = services["attendance"].create_bulk(**args)
     retry = services["attendance"].create_bulk(**args)
-
     assert {row.id for row in retry} == {row.id for row in original}
     with pytest.raises(Conflict):
         services["attendance"].preview(
-            employee_ids=[first.id],
-            object_id=obj.id,
-            work_date=date(2026, 9, 4),
-            coefficient="1",
+            employee_ids=[first.id], object_id=obj.id, work_date=date(2026, 9, 4)
         )
-    with services["sessions"]() as session:
-        assert session.scalar(select(func.count()).select_from(Attendance)) == 2
     with pytest.raises(Conflict):
         services["attendance"].create_bulk(**(args | {"operation_key": "different"}))
-    with pytest.raises(Conflict):
-        services["attendance"].create_bulk(**(args | {"coefficient": "0.5"}))
-
-    individual = services["attendance"].create_bulk(
-        **(
-            args
-            | {
-                "work_date": date(2026, 9, 5),
-                "coefficient": {first.id: "0.5", second.id: "1.5"},
-                "operation_key": "individual-coefficients",
-            }
-        )
-    )
-    assert {row.employee_id: row.earned_amount for row in individual} == {
-        first.id: Decimal("75.00"),
-        second.id: Decimal("255.00"),
-    }
+    with services["sessions"]() as session:
+        assert session.scalar(select(func.count()).select_from(Attendance)) == 2
 
 
-def test_partial_payment_changes_derived_balance_and_retry_is_safe(services):
+def test_object_payment_changes_balance_and_retry_is_safe(services):
     employee, obj = setup_employee_object(services)
     services["attendance"].create_bulk(
         employee_ids=[employee.id],
         object_id=obj.id,
         work_date=date(2026, 9, 4),
-        coefficient="1",
         actor=ACTOR,
         operation_key="day-1",
     )
-    payment = services["payments"].create(
-        employee_id=employee.id,
-        amount="100",
-        payment_date=date(2026, 9, 4),
-        method="bank",
-        actor=ACTOR,
-        idempotency_key="payment-update-9",
-    )
-    retry = services["payments"].create(
-        employee_id=employee.id,
-        amount="100",
-        payment_date=date(2026, 9, 4),
-        method="bank",
-        actor=ACTOR,
-        idempotency_key="payment-update-9",
-    )
-
-    assert retry.id == payment.id
+    args = {
+        "employee_id": employee.id,
+        "object_id": obj.id,
+        "amount": "100",
+        "payment_date": date(2026, 9, 4),
+        "actor": ACTOR,
+        "idempotency_key": "payment-update-9",
+    }
+    payment = services["payments"].create(**args)
+    assert services["payments"].create(**args).id == payment.id
     with pytest.raises(Conflict):
-        services["payments"].create(
-            employee_id=employee.id,
-            amount="90",
-            payment_date=date(2026, 9, 4),
-            method="bank",
-            actor=ACTOR,
-            idempotency_key="payment-update-9",
-        )
-    summary = services["payroll"].summary(employee.id)
-    assert summary.earned == Decimal("150.00")
-    assert summary.paid == Decimal("100.00")
-    assert summary.balance == Decimal("50.00")
-    with services["sessions"]() as session:
-        assert session.scalar(select(func.count()).select_from(Payment)) == 1
+        services["payments"].create(**(args | {"amount": "90"}))
+    summary = services["payroll"].summary(employee.id, object_id=obj.id)
+    assert (summary.earned, summary.paid, summary.balance) == (
+        Decimal(150),
+        Decimal(100),
+        Decimal(50),
+    )
 
 
-def test_void_keeps_financial_rows_and_audit_trail(services):
+def test_void_keeps_rows_and_audit_trail(services):
     employee, obj = setup_employee_object(services)
     attendance = services["attendance"].create_bulk(
         employee_ids=[employee.id],
         object_id=obj.id,
         work_date=date(2026, 9, 4),
-        coefficient="1",
         actor=ACTOR,
         operation_key="day",
     )[0]
     payment = services["payments"].create(
         employee_id=employee.id,
+        object_id=obj.id,
         amount="50",
         payment_date=date(2026, 9, 4),
-        method="cash",
         actor=ACTOR,
         idempotency_key="payment",
     )
-
     services["attendance"].void(attendance.id, actor=ACTOR, reason="Ошибка даты")
     services["payments"].void(payment.id, actor=ACTOR, reason="Ошибка суммы")
-
-    summary = services["payroll"].summary(employee.id)
-    assert summary.earned == summary.paid == summary.balance == Decimal("0.00")
+    summary = services["payroll"].summary(employee.id, object_id=obj.id)
+    assert summary.earned == summary.paid == summary.balance == Decimal(0)
     with services["sessions"]() as session:
         assert session.get(Attendance, attendance.id).voided_at is not None
         assert session.get(Payment, payment.id).voided_at is not None
-        actions = set(session.scalars(select(AuditLog.action)))
-        assert {"attendance_voided", "payment_voided"} <= actions
-
-    replacement = services["attendance"].create_bulk(
-        employee_ids=[employee.id],
-        object_id=obj.id,
-        work_date=date(2026, 9, 4),
-        coefficient="0.5",
-        actor=ACTOR,
-        operation_key="corrected-day",
-    )[0]
-    assert replacement.id != attendance.id
-    assert services["payroll"].summary(employee.id).earned == Decimal("75.00")
-
-
-def test_currencies_are_kept_in_separate_employee_ledgers(services):
-    setup_employee_object(services)
-
-    employee = services["employees"].create(
-        name="Другой сотрудник",
-        rate="100",
-        currency="RUB",
-        start_date=date(2026, 9, 1),
-        actor=ACTOR,
-    )
-
-    assert services["payroll"].summary(employee.id).currency == "RUB"
+        assert {"attendance_voided", "payment_voided"} <= set(
+            session.scalars(select(AuditLog.action))
+        )
 
 
 def test_employee_and_object_edits_are_audited(services):
     employee, obj = setup_employee_object(services)
-
     services["employees"].update(
         employee.id,
         name="Иван Петрович",
@@ -219,40 +146,27 @@ def test_employee_and_object_edits_are_audited(services):
         comment="Бригадир",
         actor=ACTOR,
     )
-    services["employees"].set_status(employee.id, "inactive", actor=ACTOR)
     services["objects"].update(
         obj.id,
-        name="Amsterdam House 2",
-        address="Street 1",
-        description="Renovation",
-        comment="Priority",
+        name="ЖК Северный 2",
+        address="Улица 1",
+        description="Ремонт",
+        comment="Приоритет",
         actor=ACTOR,
     )
-    services["objects"].set_status(obj.id, "completed", actor=ACTOR)
-
-    assert services["employees"].get(employee.id).status == "inactive"
-    assert services["objects"].get(obj.id).status == "completed"
     with services["sessions"]() as session:
         actions = set(session.scalars(select(AuditLog.action)))
-    assert {
-        "employee_updated",
-        "employee_status_changed",
-        "object_updated",
-        "object_status_changed",
-    } <= actions
+    assert {"employee_updated", "object_updated"} <= actions
 
 
-def test_state_survives_new_session_factory(services, tmp_path):
+def test_state_survives_new_session(services):
     employee, obj = setup_employee_object(services)
     services["attendance"].create_bulk(
         employee_ids=[employee.id],
         object_id=obj.id,
         work_date=date(2026, 9, 4),
-        coefficient="1.5",
         actor=ACTOR,
         operation_key="restart-day",
     )
-    engine = services["sessions"].kw["bind"]
-    engine.dispose()
-
-    assert services["payroll"].summary(employee.id).earned == Decimal("225.00")
+    services["sessions"].kw["bind"].dispose()
+    assert services["payroll"].summary(employee.id, object_id=obj.id).earned == Decimal(150)

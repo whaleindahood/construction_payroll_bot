@@ -22,38 +22,32 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 ## Persistent records
 
 - `employees`: shared identity, contacts, payment details, linked Telegram ID and
-  invitation hash/expiry. A new card does not require a global rate.
+  invitation hash/expiry.
 - `objects`: construction object, address, start date and lifecycle status.
 - `object_employees`: unique employee/object membership, active flag and optional
   shift rate. Removal marks the membership inactive; restoration reuses the row.
-- `attendance`: dated employee/object visit, coefficient, optional rate/amount
-  snapshot, idempotency key and soft-cancellation metadata.
+- `attendance`: dated employee/object shift, optional rate/amount snapshot,
+  idempotency key and soft-cancellation metadata.
 - `payments`: employee/object payments and advances with soft cancellation.
-  Historical payments without an object are retained but excluded from object
-  balances. `employee_rates` retains legacy financial history.
 - `audit_log`: durable record of creates, edits, assignments, rate changes and
   shift cancellations; not a transcript of Telegram messages.
 - `telegram_updates`: duplicate update protection.
 
 ## Invariants
 
-1. New object workflow requires active membership before recording a shift.
-   Inactive memberships reject new shifts through both current and legacy APIs.
+1. Active object membership is required before recording a shift.
 2. One active attendance row per employee/object/date; different objects have
    independent attendance and counters, including on the same date.
-3. Counters count active rows, never mutable stored totals; legacy fractional
-   rows each count as one visit. New UI records a full shift (coefficient 1).
+3. Counters count active rows, never mutable stored totals. Each row is one full shift.
 4. Confirmation is required for card creation, shifts and shift cancellation.
-5. Per-object rates override the applicable base employee rate. If both are
-   missing, attendance receives a NULL snapshot rather than an invented zero.
-   Updating a rate never changes old rows.
+5. Per-object rates are optional. A missing rate produces a NULL snapshot rather
+   than an invented zero. Updating a rate never changes old rows.
    An explicit, confirmed action may fill an unrated shift. A conditional UPDATE
    rejects already priced or cancelled rows and records the change in the audit.
 6. Cancellation retains the original row and writes an audit record.
 7. Employee access resolves only by Telegram ID in private chats; owner routes
    are gated independently. Employees cannot access another person's profile.
-8. Migration backfills memberships from attendance and object-linked payments
-   and retains every historical card, rate, payment and attendance record.
+8. Migration backfills memberships from attendance and object-linked payments.
 9. FSM dialogs use memory and per-user event isolation. Restarts discard only
    unfinished forms; saved business data persists in PostgreSQL.
 10. Object balances use only that employee's noncancelled attendance and payments
@@ -72,7 +66,6 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 - `app/bot/common.py`: service bundle, date parsing and long-message handling.
 - `app/teams.py`: object membership, rates, shift counts and history queries.
 - `app/services.py`: employee/object services, attendance and payment ledgers,
-  object-filtered payroll summaries and audit. Legacy global summaries remain
-  available for historical integrations but are not exposed in the active UI.
+  object payroll summaries and audit.
 - `app/models.py`: persistent schema; `alembic/versions/`: incremental migrations.
 - `app/main.py`: role routing, duplicate protection and bot polling.
