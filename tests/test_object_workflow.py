@@ -11,7 +11,7 @@ from app.config import Settings
 from app.db import create_schema, make_session_factory
 from app.main import compose
 from app.models import Attendance, Employee, ObjectEmployee, WorkObject
-from app.services import AttendanceService, Conflict, DomainError, EmployeeService
+from app.services import AttendanceService, Conflict, DomainError, EmployeeService, ObjectService
 from app.teams import TeamService
 from tests.test_bot_end_to_end import FakeBot, telegram_message
 from tests.test_employee_self_service import telegram_callback
@@ -222,6 +222,7 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
     bot = FakeBot()
     team = TeamService(sessions)
     employees = EmployeeService(sessions)
+    objects = ObjectService(sessions)
     attendance = AttendanceService(sessions)
 
     async def scenario():
@@ -283,11 +284,12 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
 
         await send("/start")
         assert "Выберите объект" in bot.calls[-1].text
-        main_keyboard = bot.calls[-2].reply_markup.keyboard
-        assert [button.text for row in main_keyboard for button in row] == [
-            "🏗 Объекты",
-            "👷 База сотрудников",
-        ]
+        assert len(bot.calls) == 1
+        assert any(
+            button.callback_data == "employees"
+            for row in bot.calls[-1].reply_markup.inline_keyboard
+            for button in row
+        )
         first = await create_object("Первый объект")
         object_screen = next(
             call for call in reversed(bot.calls) if getattr(call, "reply_markup", None)
@@ -455,50 +457,28 @@ def test_full_object_workflow_and_creation_during_shift(tmp_path):
         assert "позже существующих смен" in bot.calls[-1].text
         await send("/cancel")
 
-        await click(f"delete:emp:{employee.id}")
-        assert employees.get(employee.id).status == "active"
+        deleted_employee = employees.create(
+            name="Удаляемый сотрудник", start_date=date(2020, 1, 1), actor=1001
+        )
+        await click(f"delete:emp:{deleted_employee.id}")
+        assert "безвозвратно" in bot.calls[-1].text
         await click("delete:cancel")
-        assert employees.get(employee.id).status == "active"
-        await click(f"delete:emp:{employee.id}")
+        assert employees.get(deleted_employee.id).name == "Удаляемый сотрудник"
+        await click(f"delete:emp:{deleted_employee.id}")
         await click(f"deleteok:obj:{first}")  # wrong confirmation must not delete another card
         with sessions() as session:
             assert session.get(WorkObject, first).status == "active"
-        await click(f"deleteok:emp:{employee.id}")
-        assert employees.get(employee.id).status == "inactive"
-        assert not any(
-            b.callback_data == f"emp:{employee.id}"
-            for row in bot.calls[-1].reply_markup.inline_keyboard
-            for b in row
-        )
-        assert team.roster(second)[0][2] == 1
-        assert employee.id not in {row.id for row in team.available(second)}
-        await click("employees:deleted")
-        assert any(
-            b.callback_data == f"emp:{employee.id}"
-            for row in bot.calls[-1].reply_markup.inline_keyboard
-            for b in row
-        )
-        await click(f"restore:emp:{employee.id}")
-        assert employees.get(employee.id).status == "active"
-
-        await click(f"delete:obj:{first}")
-        await click(f"deleteok:obj:{first}")
+        await click(f"deleteok:emp:{deleted_employee.id}")
         with sessions() as session:
-            assert session.get(WorkObject, first).status == "archived"
-        assert not any(
-            b.callback_data == f"obj:{first}"
-            for row in bot.calls[-1].reply_markup.inline_keyboard
-            for b in row
+            assert session.get(Employee, deleted_employee.id) is None
+
+        deleted_object = objects.create(
+            name="Удаляемый объект", start_date=date(2020, 1, 1), actor=1001
         )
-        await click(f"shift:{first}")
-        assert "закрыт" in bot.calls[-1].text
-        await click("objects:deleted")
-        assert any(
-            b.callback_data == f"obj:{first}"
-            for row in bot.calls[-1].reply_markup.inline_keyboard
-            for b in row
-        )
-        await click(f"restore:obj:{first}")
+        await click(f"delete:obj:{deleted_object.id}")
+        await click(f"deleteok:obj:{deleted_object.id}")
+        with sessions() as session:
+            assert session.get(WorkObject, deleted_object.id) is None
         await click(f"delete:obj:{first}", user=9999)
         await click(f"deleteok:obj:{first}", user=9999)
         with sessions() as session:

@@ -135,35 +135,21 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     def today():
         return datetime.now(ZoneInfo(timezone_name)).date()
 
-    async def objects(message, *, deleted=False):
-        all_rows = services.objects.list(active_only=False)
-        rows = [obj for obj in all_rows if (obj.status == "archived") == deleted]
+    async def objects(message):
+        rows = services.objects.list(active_only=False)
         actions = [(obj.name, f"obj:{obj.id}") for obj in rows]
-        if deleted:
-            actions.append(("← Объекты", "objects"))
-        else:
-            actions.append(("➕ Новый объект", "obj:create"))
-            if any(obj.status == "archived" for obj in all_rows):
-                actions.append(("Удалённые объекты", "objects:deleted"))
+        actions += [("➕ Новый объект", "obj:create"), ("👷 База сотрудников", "employees")]
         await message.answer(
-            "Удаленные объекты (можно восстановить):"
-            if deleted
-            else "Выберите объект или создайте новый:",
+            "Выберите объект или создайте новый:",
             reply_markup=buttons(*actions),
         )
 
-    async def employees(message, *, deleted=False):
-        all_rows = services.employees.list(active_only=False)
-        rows = [emp for emp in all_rows if (emp.status == "inactive") == deleted]
+    async def employees(message):
+        rows = services.employees.list()
         actions = [(emp.name, f"emp:{emp.id}") for emp in rows]
-        if deleted:
-            actions.append(("← Сотрудники", "employees"))
-        else:
-            actions.append(("➕ Новый сотрудник", "emp:create"))
-            if any(emp.status == "inactive" for emp in all_rows):
-                actions.append(("Удалённые сотрудники", "employees:deleted"))
+        actions += [("➕ Новый сотрудник", "emp:create"), ("← Объекты", "objects")]
         await message.answer(
-            "Удаленные сотрудники (можно восстановить):" if deleted else "База сотрудников:",
+            "База сотрудников:",
             reply_markup=buttons(*actions),
         )
 
@@ -225,13 +211,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         lines.extend(
             f"{obj.name} — {count} смен" for obj, count in team.employee_objects(employee.id)
         )
-        actions = (
-            [
-                ("Изменить данные", f"empedit:{employee.id}"),
-            ]
-            if employee.status == "active"
-            else [("♻️ Восстановить сотрудника", f"restore:emp:{employee.id}")]
-        )
+        actions = [("Изменить данные", f"empedit:{employee.id}")]
         if employee.telegram_id is None and employee.status == "active":
             actions.append(("🔗 Пригласить сотрудника", f"empinvite:{employee.id}"))
         actions.append(("← Назад", f"member:{member_id}" if member_id else "employees"))
@@ -259,10 +239,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
     @router.message(Command("start", "menu"))
     async def start(message: Message, state: FSMContext):
         await state.clear()
-        await message.answer(
-            "Смены и выплаты. Выберите объект.",
-            reply_markup=kb.MAIN,
-        )
         await objects(message)
 
     @router.message(Command("cancel"))
@@ -285,14 +261,11 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await callback.answer()
         await objects(callback.message)
 
-    @router.callback_query(F.data.in_({"objects:deleted", "employees:deleted", "employees"}))
-    async def card_lists(callback: CallbackQuery, state: FSMContext):
+    @router.callback_query(F.data == "employees")
+    async def employee_list(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await callback.answer()
-        if callback.data == "objects:deleted":
-            await objects(callback.message, deleted=True)
-        else:
-            await employees(callback.message, deleted=callback.data == "employees:deleted")
+        await employees(callback.message)
 
     @router.callback_query(F.data.regexp(r"^delete:(obj|emp):[0-9a-f-]{36}$"))
     async def delete_preview(callback: CallbackQuery, state: FSMContext):
@@ -304,12 +277,12 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         await state.update_data(delete_kind=kind, delete_id=entity_id)
         await callback.answer()
         detail = (
-            "Объект исчезнет из основного списка, новые смены на нем будут недоступны. "
+            "Будут безвозвратно удалены объект, его состав, смены и выплаты. "
             if kind == "obj"
-            else "Сотрудник исчезнет из основной базы и выбора на смену. Его доступ к боту будет закрыт на всех объектах. "
+            else "Будут безвозвратно удалены карточка сотрудника, его смены, выплаты и связи со всеми объектами. "
         )
         await callback.message.answer(
-            f"Удалить «{entity.name}»?\n\n{detail}История смен и выплат сохранится. Карточку можно восстановить в списке удаленных.",
+            f"Удалить «{entity.name}»?\n\n{detail}Восстановить эти данные будет нельзя.",
             reply_markup=buttons(
                 ("🗑 Подтвердить удаление", f"deleteok:{kind}:{entity_id}"),
                 ("Отмена", "delete:cancel"),
@@ -323,9 +296,9 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         if (kind, entity_id) != (data.get("delete_kind"), data.get("delete_id")):
             raise DomainError("Это подтверждение устарело. Откройте нужную карточку заново.")
         if kind == "obj":
-            services.objects.set_status(entity_id, "archived", actor=callback.from_user.id)
+            services.objects.delete(entity_id, actor=callback.from_user.id)
         else:
-            services.employees.set_status(entity_id, "inactive", actor=callback.from_user.id)
+            services.employees.delete(entity_id, actor=callback.from_user.id)
         await state.clear()
         await callback.answer("Карточка удалена")
         if kind == "obj":
@@ -343,21 +316,6 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
         elif data.get("delete_kind") == "obj":
             await state.update_data(object_id=data["delete_id"])
             await object_card(callback.message, data["delete_id"])
-
-    @router.callback_query(F.data.startswith("restore:"))
-    async def restore(callback: CallbackQuery, state: FSMContext):
-        _, kind, entity_id = callback.data.split(":", 2)
-        if kind not in {"obj", "emp"}:
-            raise DomainError("Неизвестная карточка.")
-        service = services.objects if kind == "obj" else services.employees
-        service.set_status(entity_id, "active", actor=callback.from_user.id)
-        await state.clear()
-        await callback.answer("Карточка восстановлена")
-        if kind == "obj":
-            await state.update_data(object_id=entity_id)
-            await object_card(callback.message, entity_id)
-        else:
-            await employee_card(callback.message, entity_id)
 
     @router.callback_query(F.data == "obj:create")
     async def create_object(callback: CallbackQuery, state: FSMContext):
@@ -436,9 +394,7 @@ def build_router(services: Services, *, timezone_name: str) -> Router:
                     "Завершить работы" if obj.status == "active" else "Возобновить работы",
                     f"objectstatus:{obj.id}:{'completed' if obj.status == 'active' else 'active'}",
                 ),
-                ("Восстановить объект", f"restore:obj:{obj.id}")
-                if obj.status == "archived"
-                else ("Удалить объект", f"delete:obj:{obj.id}"),
+                ("Удалить объект", f"delete:obj:{obj.id}"),
                 ("← Объект", f"obj:{obj.id}"),
             ),
         )

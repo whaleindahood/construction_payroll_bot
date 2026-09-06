@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
-from app.models import Attendance, AuditLog, Payment
+from app.models import Attendance, AuditLog, Employee, ObjectEmployee, Payment, WorkObject
 from app.services import Conflict
 from app.teams import TeamService
 
@@ -25,6 +25,58 @@ def setup_employee_object(services):
     )[0]
     TeamService(services["sessions"]).set_rate(member.id, "150", actor=ACTOR)
     return employee, obj
+
+
+def add_shift_and_payment(services, employee, obj):
+    services["attendance"].create_bulk(
+        employee_ids=[employee.id],
+        object_id=obj.id,
+        work_date=date(2026, 9, 4),
+        actor=ACTOR,
+        operation_key=f"delete-shift:{employee.id}:{obj.id}",
+    )
+    services["payments"].create(
+        employee_id=employee.id,
+        object_id=obj.id,
+        amount="100",
+        payment_date=date(2026, 9, 4),
+        actor=ACTOR,
+        idempotency_key=f"delete-payment:{employee.id}:{obj.id}",
+    )
+
+
+def test_employee_delete_removes_card_and_all_related_records(services):
+    employee, obj = setup_employee_object(services)
+    add_shift_and_payment(services, employee, obj)
+
+    services["employees"].delete(employee.id, actor=ACTOR)
+
+    with services["sessions"]() as session:
+        assert session.get(Employee, employee.id) is None
+        assert session.get(WorkObject, obj.id) is not None
+        assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 0
+        assert session.scalar(select(func.count()).select_from(Attendance)) == 0
+        assert session.scalar(select(func.count()).select_from(Payment)) == 0
+        assert session.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == "employee_deleted")
+        ) == 1
+
+
+def test_object_delete_removes_object_ledger_but_keeps_employee(services):
+    employee, obj = setup_employee_object(services)
+    add_shift_and_payment(services, employee, obj)
+
+    services["objects"].delete(obj.id, actor=ACTOR)
+
+    with services["sessions"]() as session:
+        assert session.get(WorkObject, obj.id) is None
+        assert session.get(Employee, employee.id) is not None
+        assert session.scalar(select(func.count()).select_from(ObjectEmployee)) == 0
+        assert session.scalar(select(func.count()).select_from(Attendance)) == 0
+        assert session.scalar(select(func.count()).select_from(Payment)) == 0
+        assert session.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == "object_deleted")
+        ) == 1
 
 
 def test_object_rate_change_never_recalculates_old_shift(services):

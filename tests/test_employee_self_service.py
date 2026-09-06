@@ -193,6 +193,16 @@ def test_employee_dialog_and_owner_access_boundaries(tmp_path):
         await click(f"empinvite:{third.id}", user=2001)
         assert "недоступно" in bot.calls[-1].text
 
+        await send("/start", user=3001)
+        assert "Введите фамилию" in bot.calls[-1].text
+        await send("Самостоятельный Сотрудник", user=3001)
+        await send("Тестовый банк, СБП +79991112233", user=3001)
+        await click("profile:save", user=3001)
+        registered = employees.by_telegram(3001)
+        assert registered is not None
+        assert registered.name == "Самостоятельный Сотрудник"
+        assert registered.payment_details == "Тестовый банк, СБП +79991112233"
+
         with sessions() as session, session.begin():
             session.get(User, 1001).is_active = False
         await send("/start", user=1001)

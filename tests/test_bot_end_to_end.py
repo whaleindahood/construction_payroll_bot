@@ -58,7 +58,7 @@ def test_owner_update_runs_end_to_end_and_duplicate_is_ignored(tmp_path):
     asyncio.run(configured_bot.session.close())
 
 
-def test_unknown_telegram_id_is_rejected(tmp_path):
+def test_unknown_telegram_id_can_start_registration(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'bot.db'}"
     create_schema(make_session_factory(database_url))
     configured_bot, dispatcher = compose(
@@ -73,6 +73,6 @@ def test_unknown_telegram_id_is_rejected(tmp_path):
     asyncio.run(dispatcher.feed_update(bot, telegram_message(78, 9999, "/start")))
 
     assert len(bot.calls) == 1
-    assert "Попросите владельца" in bot.calls[0].text
+    assert "Введите фамилию" in bot.calls[0].text
     asyncio.run(bot.session.close())
     asyncio.run(configured_bot.session.close())

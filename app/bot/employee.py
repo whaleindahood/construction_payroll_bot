@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, MagicData
 from aiogram.fsm.context import FSMContext
@@ -48,7 +50,10 @@ def build_employee_router(employees: EmployeeService) -> Router:
             reply_markup=one_button("✏️ Заполнить / изменить данные", "profile:edit"),
         )
 
-    async def begin_profile(message: Message, state: FSMContext) -> None:
+    async def begin_profile(
+        message: Message, state: FSMContext, *, creating: bool = False
+    ) -> None:
+        await state.update_data(profile_creating=creating)
         await state.set_state(EmployeeProfile.name)
         await message.answer(
             "Введите фамилию, имя и отчество (если есть).\n"
@@ -73,7 +78,11 @@ def build_employee_router(employees: EmployeeService) -> Router:
                 return
             await begin_profile(message, state)
             return
-        await show_profile(message, actor_id(message))
+        telegram_id = actor_id(message)
+        if employees.by_telegram(telegram_id) is None:
+            await begin_profile(message, state, creating=True)
+            return
+        await show_profile(message, telegram_id)
 
     @router.callback_query(F.data == "profile:edit")
     async def edit(callback: CallbackQuery, state: FSMContext):
@@ -125,9 +134,20 @@ def build_employee_router(employees: EmployeeService) -> Router:
     async def save(callback: CallbackQuery, state: FSMContext):
         data = await state.get_data()
         try:
-            employees.update_own_profile(
-                callback.from_user.id, name=data["name"], payment_details=data["payment_details"]
-            )
+            if data.get("profile_creating"):
+                employees.create(
+                    name=data["name"],
+                    payment_details=data["payment_details"],
+                    telegram_id=callback.from_user.id,
+                    start_date=datetime.now(UTC).date(),
+                    actor=callback.from_user.id,
+                )
+            else:
+                employees.update_own_profile(
+                    callback.from_user.id,
+                    name=data["name"],
+                    payment_details=data["payment_details"],
+                )
         except DomainError as exc:
             await state.clear()
             await callback.answer(str(exc), show_alert=True)

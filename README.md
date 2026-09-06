@@ -85,19 +85,19 @@ start date and notes. A start date cannot move beyond existing shifts, so editin
 cannot invalidate recorded history.
 
 **Удалить объект / Удалить сотрудника из базы** asks for confirmation. Employee
-deletion is under **Личные данные → Изменить данные**. Deleted cards move
-to **Удаленные объекты / Удаленные сотрудники**, where they can be restored.
-Deleted lists appear only when there are deleted cards. Deleted objects reject new shifts; deleted employees cannot enter their profile
-or be selected for a shift on any object. Existing shifts, payments and object
-memberships remain stored, and their historical counts remain visible.
+deletion is under **Личные данные → Изменить данные**. Confirmation permanently
+deletes the selected card and its memberships, shifts and payments. Deleting an
+object does not delete the global employee cards that worked there.
 
 ## Employee self-service
 
 Owners use the IDs in `PAYROLL_OWNER_IDS`. All dialogs are private chats.
-Employees can only view and edit their own full name and payment details.
+An employee can open the bot, create a global card with their full name and
+payment details, then view and edit only that card. The owner attaches it to an
+object and sets the object rate.
 
-Open the employee card (from the shared database or object team) and select
-**Пригласить сотрудника**. Send the generated link personally to the employee.
+For a card created by the owner, select **Пригласить сотрудника** and send the
+generated link personally. The link binds that existing card to the employee.
 They enter their full name and payment details and confirm. Reopen their card
 to see the saved information. Later they can edit it with `/start` or `/profile`;
 `/cancel` discards an unfinished form.

@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Literal, overload
 
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -357,6 +358,33 @@ class EmployeeService:
             )
         return employee
 
+    def delete(self, employee_id: str, *, actor: int) -> None:
+        with self.sessions() as session, session.begin():
+            employee = session.get(Employee, employee_id)
+            if employee is None:
+                raise NotFound("Сотрудник не найден.")
+            shifts = session.scalar(
+                select(func.count()).select_from(Attendance).where(Attendance.employee_id == employee_id)
+            )
+            payments = session.scalar(
+                select(func.count()).select_from(Payment).where(Payment.employee_id == employee_id)
+            )
+            session.execute(sql_delete(Attendance).where(Attendance.employee_id == employee_id))
+            session.execute(sql_delete(Payment).where(Payment.employee_id == employee_id))
+            session.execute(
+                sql_delete(ObjectEmployee).where(ObjectEmployee.employee_id == employee_id)
+            )
+            session.delete(employee)
+            session.flush()
+            audit(
+                session,
+                actor,
+                "employee_deleted",
+                "employee",
+                employee_id,
+                before={"name": employee.name, "shifts": shifts, "payments": payments},
+            )
+
     def list(self, *, active_only: bool = True) -> list[Employee]:
         with self.sessions() as session:
             query = select(Employee).order_by(Employee.name)
@@ -481,6 +509,31 @@ class ObjectService:
                 after={"status": status},
             )
         return row
+
+    def delete(self, object_id: str, *, actor: int) -> None:
+        with self.sessions() as session, session.begin():
+            row = session.get(WorkObject, object_id)
+            if row is None:
+                raise NotFound("Объект не найден.")
+            shifts = session.scalar(
+                select(func.count()).select_from(Attendance).where(Attendance.object_id == object_id)
+            )
+            payments = session.scalar(
+                select(func.count()).select_from(Payment).where(Payment.object_id == object_id)
+            )
+            session.execute(sql_delete(Attendance).where(Attendance.object_id == object_id))
+            session.execute(sql_delete(Payment).where(Payment.object_id == object_id))
+            session.execute(sql_delete(ObjectEmployee).where(ObjectEmployee.object_id == object_id))
+            session.delete(row)
+            session.flush()
+            audit(
+                session,
+                actor,
+                "object_deleted",
+                "object",
+                object_id,
+                before={"name": row.name, "shifts": shifts, "payments": payments},
+            )
 
     def list(self, *, active_only: bool = True) -> list[WorkObject]:
         with self.sessions() as session:

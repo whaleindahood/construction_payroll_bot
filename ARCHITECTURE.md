@@ -7,13 +7,14 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
 
 - Owner: object → visible team → select attendees for today → confirm →
   per-employee counters for this object.
-- Employee: single-use invitation → full name and payment details → confirmation.
+- Employee: `/start` → full name and payment details → confirmation. A single-use
+  invitation can instead bind a card that the owner created earlier.
 - Owner payments: employee on an object → amount → confirmation. Date defaults
   to today; date and comment editing are optional. Payment history supports
   confirmed cancellation of errors.
-- Navigation: two bottom buttons (objects and shared employee database); object
-  cards show the roster and expose shifts, bulk attachment, payments, calculation
-  and settings. Employee/object cards expose the common actions directly.
+- Navigation: `/start` opens one object list message. Object cards show the roster
+  and expose shifts, bulk attachment, payments, calculation and settings. The
+  shared employee database is available from the object list.
 - Employee creation asks for full name, optional payment details and optional
   object rate. Phone and Telegram ID are edited later through personal data.
 - The old payroll router, its keyboards and global report helpers have been
@@ -30,7 +31,7 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
   idempotency key and soft-cancellation metadata.
 - `payments`: employee/object payments and advances with soft cancellation.
 - `audit_log`: durable record of creates, edits, assignments, rate changes and
-  shift cancellations; not a transcript of Telegram messages.
+  cancellations and permanent card deletions; not a transcript of Telegram messages.
 - `telegram_updates`: duplicate update protection.
 
 ## Invariants
@@ -40,6 +41,8 @@ services → SQLAlchemy → PostgreSQL (production) or SQLite (tests/local).
    independent attendance and counters, including on the same date.
 3. Counters count active rows, never mutable stored totals. Each row is one full shift.
 4. Confirmation is required for card creation, shifts and shift cancellation.
+   Permanent employee/object deletion also requires confirmation and removes its
+   memberships, shifts and payments in one transaction.
 5. Per-object rates are optional. A missing rate produces a NULL snapshot rather
    than an invented zero. Updating a rate never changes old rows.
    An explicit, confirmed action may fill an unrated shift. A conditional UPDATE
